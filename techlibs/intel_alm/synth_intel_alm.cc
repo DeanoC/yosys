@@ -202,6 +202,12 @@ struct SynthIntelALMPass : public ScriptPass {
 				run("opt_dff -nosdff a:ram_style=m10k_tdp a:ram_style=m10k_tdp_byte %u a:ram_style=m10k_tdp_mixed %u %m");
 				run("opt_clean a:ram_style=m10k_tdp a:ram_style=m10k_tdp_byte %u a:ram_style=m10k_tdp_mixed %u %m");
 				run("memory_dff -no-rw-check a:ram_style=m10k_tdp a:ram_style=m10k_tdp_byte a:ram_style=m10k_tdp_mixed");
+				// Standard M10K SDP memories can retain a zero-valued asynchronous
+				// read-output reset in the block instead of extracting a fabric FF.
+				// Cover both Intel spelling variants and their usual upper-case value.
+				run("opt_dff -nosdff a:ramstyle=M10K a:ramstyle=m10k a:ram_style=M10K a:ram_style=m10k");
+				run("opt_clean a:ramstyle=M10K a:ramstyle=m10k a:ram_style=M10K a:ram_style=m10k");
+				run("memory_dff -no-rw-check a:ramstyle=M10K a:ramstyle=m10k a:ram_style=M10K a:ram_style=m10k");
 			}
 			run("fsm");
 			run("opt");
@@ -237,6 +243,14 @@ struct SynthIntelALMPass : public ScriptPass {
 
 		if (!nobram && check_label("map_bram", "(skip if -nobram)")) {
 			if (bram_type == "m10k") {
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ramstyle=M10K");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ramstyle=m10k");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ram_style=M10K");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ram_style=m10k");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
 				run("memory_libmap -lib +/intel_alm/common/bram_m10k_tdp_mixed.txt a:ram_style=m10k_tdp_mixed");
 				run("techmap -map +/intel_alm/common/bram_m10k_tdp_mixed_map.v");
 				run("memory_libmap -lib +/intel_alm/common/bram_m10k_tdp_byte.txt a:ram_style=m10k_tdp_byte");
