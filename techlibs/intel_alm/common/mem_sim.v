@@ -75,7 +75,8 @@ endmodule
 // --------
 // TODO
 
-module MISTRAL_M10K(CLK1, A1ADDR, A1DATA, A1EN, A1BE, B1ADDR, B1DATA, B1EN, CLK2);
+module MISTRAL_M10K(CLK1, A1ADDR, A1DATA, A1EN, A1BE, B1ADDR, B1DATA,
+    B1EN, CLK2, ACLR0, ACLR1);
 
 parameter INIT = 0;
 
@@ -92,6 +93,10 @@ parameter CFG_BYTE_ENABLE = 0;
 
 (* clkbuf_sink *) input CLK1;
 (* clkbuf_sink *) input CLK2;
+// Active-high asynchronous clear controls for the registered read outputs.
+// Keep these ports in the primitive interface even when a design does not use
+// them; the Mistral nextpnr backend maps them to the physical M10K clear pins.
+input ACLR0, ACLR1;
 input [CFG_ABITS-1:0] A1ADDR;
 input [CFG_RD_ABITS-1:0] B1ADDR;
 input [CFG_DBITS-1:0] A1DATA;
@@ -166,7 +171,7 @@ endmodule
 // Cross-port accesses to overlapping physical storage involving a write have unspecified
 // hardware results. This model imposes no supported cross-port write priority.
 module MISTRAL_M10K_TDP(CLK1, CLK2, A1ADDR, B1ADDR, A1DATA, B1DATA,
-    A1Q, B1Q, A1EN, B1EN, A1WE, B1WE, A1BE, B1BE);
+    A1Q, B1Q, A1EN, B1EN, A1WE, B1WE, A1BE, B1BE, ACLR0, ACLR1);
 parameter CFG_ABITS = 10;
 parameter CFG_DBITS = 10;
 parameter CFG_BYTE_ENABLE = 0;
@@ -176,6 +181,8 @@ parameter CFG_RD_ABITS = CFG_ABITS;
 parameter CFG_RD_DBITS = CFG_DBITS;
 parameter [10239:0] INIT = 0;
 (* clkbuf_sink *) input CLK1, CLK2;
+// Active-high asynchronous clear controls for the registered port outputs.
+input ACLR0, ACLR1;
 input [CFG_ABITS-1:0] A1ADDR;
 input [CFG_RD_ABITS-1:0] B1ADDR;
 input [CFG_DBITS-1:0] A1DATA;
