@@ -44,6 +44,7 @@ is independent of the existing SDP `MISTRAL_M10K`:
 | `CFG_ABITS`, `CFG_DBITS` | Exactly `(10,10)` or `(9,20)` |
 | `INIT[10239:0]` | Canonical low-address-first storage; word `a` starts at `a*CFG_DBITS` |
 | `CLK1`, `CLK2` | Positive-edge clocks for ports A and B |
+| `ACLR0`, `ACLR1` | Active-high asynchronous clear inputs for the registered outputs |
 | `A1ADDR`, `B1ADDR` | `CFG_ABITS`-bit word addresses |
 | `A1DATA`, `B1DATA` | `CFG_DBITS`-bit write inputs |
 | `A1Q`, `B1Q` | Registered `CFG_DBITS`-bit read outputs |
