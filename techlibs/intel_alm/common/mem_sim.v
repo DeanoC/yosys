@@ -90,6 +90,10 @@ parameter CFG_DUAL_CLOCK = 0;
 // Byte-enable mode uses two physical M10K write lanes and an active-high
 // logical write enable. The default keeps the original active-low contract.
 parameter CFG_BYTE_ENABLE = 0;
+// Flow-through simple-dual mode keeps writes on CLK1 while exposing the B
+// address directly to the read data.  The mapper ties B1EN high and leaves
+// CLK2 unused in this mode.
+parameter CFG_ASYNC_READ = 0;
 
 (* clkbuf_sink *) input CLK1;
 (* clkbuf_sink *) input CLK2;
@@ -120,7 +124,39 @@ specify
 endspecify
 `endif
 
-generate if (CFG_MIXED_WIDTH) begin: mixed
+generate if (CFG_ASYNC_READ) begin: async_read
+    localparam [(1 << CFG_ABITS)*CFG_DBITS-1:0] INIT_DATA = INIT;
+    reg [CFG_DBITS-1:0] mem [0:(1 << CFG_ABITS)-1];
+    integer i;
+    initial
+        for (i = 0; i < (1 << CFG_ABITS); i = i + 1)
+            mem[i] = INIT_DATA[i * CFG_DBITS +: CFG_DBITS];
+
+    // Keep the primitive's established write-enable polarity: the 10- and
+    // 20-bit lanes use active-low A1EN, while 40-bit and byte-enabled lanes
+    // use active-high A1EN.  The mapper supplies the corresponding polarity
+    // when it connects the source memory's active-high write enable.
+    wire logical_write_enable = CFG_BYTE_ENABLE ? A1EN :
+                                 (CFG_DBITS == 40 ? A1EN : !A1EN);
+    always @(posedge CLK1) begin
+        if (CFG_BYTE_ENABLE) begin
+            if (logical_write_enable) begin
+                if (A1BE[0]) mem[A1ADDR][(CFG_DBITS / 2 > 0 ? CFG_DBITS / 2 : CFG_DBITS)-1:0] <=
+                    A1DATA[(CFG_DBITS / 2 > 0 ? CFG_DBITS / 2 : CFG_DBITS)-1:0];
+                if (A1BE[1]) mem[A1ADDR][CFG_DBITS-1:CFG_DBITS / 2] <=
+                    A1DATA[CFG_DBITS-1:CFG_DBITS / 2];
+            end
+        end else if (logical_write_enable)
+            mem[A1ADDR] <= A1DATA;
+    end
+
+    always @* begin
+        if (B1EN)
+            B1DATA = mem[B1ADDR];
+        else
+            B1DATA = {CFG_RD_DBITS{1'bx}};
+    end
+end else if (CFG_MIXED_WIDTH) begin: mixed
     // A canonical array of 10-bit words preserves low-address-first ordering
     // across different read and write widths and the memory_libmap INIT bus.
     localparam [10239:0] CONTENTS = INIT;
@@ -174,6 +210,9 @@ module MISTRAL_M10K_TDP(CLK1, CLK2, A1ADDR, B1ADDR, A1DATA, B1DATA,
     A1Q, B1Q, A1EN, B1EN, A1WE, B1WE, A1BE, B1BE, ACLR0, ACLR1);
 parameter CFG_ABITS = 10;
 parameter CFG_DBITS = 10;
+// Flow-through true-dual-port mode keeps both write clocks while exposing
+// both port addresses directly on the read outputs.
+parameter CFG_ASYNC_READ = 0;
 parameter CFG_BYTE_ENABLE = 0;
 parameter CFG_MIXED_WIDTH = 0;
 // Historical RD prefix: these describe both the read and write side of port B.
@@ -191,7 +230,28 @@ input A1EN, B1EN, A1WE, B1WE;
 input [1:0] A1BE, B1BE;
 output reg [CFG_DBITS-1:0] A1Q;
 output reg [CFG_RD_DBITS-1:0] B1Q;
-generate if (CFG_MIXED_WIDTH) begin: mixed
+generate if (CFG_ASYNC_READ) begin: async_read
+reg [CFG_DBITS-1:0] mem [0:(1 << CFG_ABITS)-1];
+integer i;
+initial for (i = 0; i < (1 << CFG_ABITS); i = i + 1)
+    mem[i] = INIT[i*CFG_DBITS +: CFG_DBITS];
+always @(posedge CLK1)
+    if (A1EN && A1WE)
+        mem[A1ADDR] <= A1DATA;
+always @(posedge CLK2)
+    if (B1EN && B1WE)
+        mem[B1ADDR] <= B1DATA;
+always @* begin
+    if (A1EN)
+        A1Q = mem[A1ADDR];
+    else
+        A1Q = {CFG_DBITS{1'bx}};
+    if (B1EN)
+        B1Q = mem[B1ADDR];
+    else
+        B1Q = {CFG_RD_DBITS{1'bx}};
+end
+end else if (CFG_MIXED_WIDTH) begin: mixed
     // Canonical low-address-first 10-bit chunks, shared by both read/write ports.
     reg [9:0] words [0:1023];
     integer i, a, b;
