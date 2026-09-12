@@ -243,14 +243,14 @@ struct SynthIntelALMPass : public ScriptPass {
 
 		if (!nobram && check_label("map_bram", "(skip if -nobram)")) {
 			if (bram_type == "m10k") {
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ramstyle=M10K");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ramstyle=m10k");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ram_style=M10K");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ram_style=m10k");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_async.txt a:ramstyle=M10K");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_async_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_async.txt a:ramstyle=m10k");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_async_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_async.txt a:ram_style=M10K");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_async_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_async.txt a:ram_style=m10k");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_async_map.v");
 				run("memory_libmap -lib +/intel_alm/common/bram_m10k_tdp_mixed.txt a:ram_style=m10k_tdp_mixed");
 				run("techmap -map +/intel_alm/common/bram_m10k_tdp_mixed_map.v");
 				run("memory_libmap -lib +/intel_alm/common/bram_m10k_tdp_byte.txt a:ram_style=m10k_tdp_byte");
