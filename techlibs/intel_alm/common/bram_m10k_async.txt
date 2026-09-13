@@ -1,0 +1,60 @@
+# Cyclone V M10K simple-dual-port RAM with a synchronous write port and an
+# asynchronous read port.  Keep the geometries explicit: the Mistral backend
+# currently accepts equal-width 1024x10, 512x20, and 256x40 async memories.
+ram block $__MISTRAL_M10K_ASYNC_10_ {
+ abits 10;
+ width 10;
+ cost 100;
+ init any;
+ style "m10k";
+ port sw "W" {
+  clock posedge;
+  clken;
+ }
+ port ar "R" {
+ }
+}
+
+ram block $__MISTRAL_M10K_ASYNC_20_ {
+ abits 9;
+ width 20;
+ cost 100;
+ init any;
+ style "m10k";
+ port sw "W" {
+  clock posedge;
+  clken;
+ }
+ port ar "R" {
+ }
+}
+
+ram block $__MISTRAL_M10K_ASYNC_40_ {
+ abits 8;
+ width 40;
+ cost 100;
+ init any;
+ style "m10k";
+ port sw "W" {
+  clock posedge;
+  clken;
+ }
+ port ar "R" {
+ }
+}
+
+# Cyclone V true-dual-port M10K with synchronous writes and flow-through
+# reads on both ports.  The higher cost keeps the one-write/one-read case on
+# the smaller SDP cell above; this form is selected when a memory needs both
+# physical write ports or more than one asynchronous read port.
+ram block $__MISTRAL_M10K_ASYNC_TDP_ {
+ abits 10;
+ widths 10 20 global;
+ cost 150;
+ init any;
+ style "m10k";
+ port arsw "A" "B" {
+  clock posedge;
+  clken;
+ }
+}

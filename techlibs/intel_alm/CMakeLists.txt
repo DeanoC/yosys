@@ -52,6 +52,10 @@ yosys_pass(synth_intel_alm
 		cyclonev/cells_sim.v
 
 		# RAM
+		common/bram_m10k_aclr.txt
+		common/bram_m10k_aclr_map.v
+		common/bram_m10k_async.txt
+		common/bram_m10k_async_map.v
 		common/bram_m10k_tdp_byte.txt
 		common/bram_m10k_tdp_byte_map.v
 		common/bram_m10k_tdp_mixed.txt
