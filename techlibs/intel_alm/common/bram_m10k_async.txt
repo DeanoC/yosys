@@ -1,3 +1,95 @@
+# Registered ramstyle=M10K must win over the flow-through cells below.
+# The async TDP otherwise matches a clocked-read two-port memory, emits
+# CFG_ASYNC_READ with a constant CLK2, and leaves the output registers in
+# fabric — nextpnr rejects that shape. Cost 110 sits above the ACLR SDP
+# cells (100) so a zero-valued read-output reset still maps to ACLR1.
+ram block $__MISTRAL_M10K_SYNC_10_ {
+ abits 10;
+ width 10;
+ cost 110;
+ init any;
+ style "m10k";
+ port sw "W" {
+  clock posedge;
+  clken;
+ }
+ port sr "R" {
+  clock posedge;
+  clken;
+  rden;
+ }
+}
+
+ram block $__MISTRAL_M10K_SYNC_20_ {
+ abits 9;
+ width 20;
+ cost 110;
+ init any;
+ style "m10k";
+ port sw "W" {
+  clock posedge;
+  clken;
+ }
+ port sr "R" {
+  clock posedge;
+  clken;
+  rden;
+ }
+}
+
+ram block $__MISTRAL_M10K_SYNC_40_ {
+ abits 8;
+ width 40;
+ cost 110;
+ init any;
+ style "m10k";
+ port sw "W" {
+  clock posedge;
+  clken;
+ }
+ port sr "R" {
+  clock posedge;
+  clken;
+  rden;
+ }
+}
+
+ram block $__MISTRAL_M10K_SYNC_BYTE_ {
+ abits 9;
+ width 20;
+ byte 10;
+ cost 110;
+ init any;
+ style "m10k";
+ port sw "W" {
+  clock posedge;
+  clken;
+  wrbe_separate;
+ }
+ port sr "R" {
+  clock posedge;
+  clken;
+  rden;
+ }
+}
+
+# Two registered read/write ports. Cost 140 is above one SYNC/ACLR SDP so a
+# one-write registered memory stays SDP (and keeps ACLR1), below the async
+# TDP (150) so clocked-read two-port memories are not reclassified as
+# flow-through, and below two SYNC SDP cells so Coleco 256x4 line banks
+# still share one TDP.
+ram block $__MISTRAL_M10K_SYNC_TDP_ {
+ abits 10;
+ widths 10 20 global;
+ cost 140;
+ init any;
+ style "m10k";
+ port srsw "A" "B" {
+  clock posedge;
+  clken;
+ }
+}
+
 # Cyclone V M10K simple-dual-port RAM with a synchronous write port and an
 # asynchronous read port.  Keep the geometries explicit: the Mistral backend
 # currently accepts equal-width 1024x10, 512x20, and 256x40 async memories.
