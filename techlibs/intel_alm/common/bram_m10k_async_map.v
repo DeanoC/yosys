@@ -9,11 +9,13 @@ input PORT_R_CLK, PORT_R_CLK_EN, PORT_R_RD_EN;
 input [9:0] PORT_W_ADDR, PORT_R_ADDR;
 input [9:0] PORT_W_WR_DATA;
 output [9:0] PORT_R_RD_DATA;
+// 10/20-bit non-byte SDP A1EN is active-low, matching bram_m10k_map.v
+// and the async maps. 40-bit and byte-enable lanes stay active-high.
 wire write_enable = PORT_W_CLK_EN && PORT_W_WR_EN;
 MISTRAL_M10K #(.CFG_ABITS(10), .CFG_DBITS(10), .CFG_DUAL_CLOCK(1),
     .INIT(INIT)) _TECHMAP_REPLACE_ (
     .CLK1(PORT_W_CLK), .CLK2(PORT_R_CLK),
-    .A1ADDR(PORT_W_ADDR), .A1DATA(PORT_W_WR_DATA), .A1EN(write_enable),
+    .A1ADDR(PORT_W_ADDR), .A1DATA(PORT_W_WR_DATA), .A1EN(!write_enable),
     .B1ADDR(PORT_R_ADDR), .B1DATA(PORT_R_RD_DATA),
     .B1EN(PORT_R_CLK_EN && PORT_R_RD_EN), .ACLR0(1'b0), .ACLR1(1'b0));
 endmodule
@@ -31,7 +33,7 @@ wire write_enable = PORT_W_CLK_EN && PORT_W_WR_EN;
 MISTRAL_M10K #(.CFG_ABITS(9), .CFG_DBITS(20), .CFG_DUAL_CLOCK(1),
     .INIT(INIT)) _TECHMAP_REPLACE_ (
     .CLK1(PORT_W_CLK), .CLK2(PORT_R_CLK),
-    .A1ADDR(PORT_W_ADDR), .A1DATA(PORT_W_WR_DATA), .A1EN(write_enable),
+    .A1ADDR(PORT_W_ADDR), .A1DATA(PORT_W_WR_DATA), .A1EN(!write_enable),
     .B1ADDR(PORT_R_ADDR), .B1DATA(PORT_R_RD_DATA),
     .B1EN(PORT_R_CLK_EN && PORT_R_RD_EN), .ACLR0(1'b0), .ACLR1(1'b0));
 endmodule
