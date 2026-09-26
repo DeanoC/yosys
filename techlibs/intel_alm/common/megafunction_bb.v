@@ -725,3 +725,43 @@ output out_data;
 output out_clk;
 
 endmodule
+
+// FPGA-to-HPS SDRAM command port. Widths match the Cyclone V atom.
+// Command port 2 is MiSTer f2h_sdram2. Its 64-bit data uses read/write port 3.
+(* keep *)
+module cyclonev_hps_interface_fpga2sdram(
+    cfg_axi_mm_select, cfg_cport_rfifo_map, cfg_cport_type, cfg_cport_wfifo_map,
+    cfg_port_width, cfg_rfifo_cport_map, cfg_wfifo_cport_map,
+    cmd_port_clk_0, cmd_port_clk_1, cmd_port_clk_2, cmd_port_clk_3, cmd_port_clk_4, cmd_port_clk_5,
+    cmd_valid_0, cmd_valid_1, cmd_valid_2, cmd_valid_3, cmd_valid_4, cmd_valid_5,
+    cmd_data_2, cmd_ready_2,
+    wr_clk_0, wr_clk_1, wr_clk_2, wr_clk_3,
+    wr_valid_0, wr_valid_1, wr_valid_2, wr_valid_3,
+    wr_data_3,
+    rd_clk_0, rd_clk_1, rd_clk_2, rd_clk_3,
+    rd_ready_0, rd_ready_1, rd_ready_2, rd_ready_3,
+    rd_data_3, rd_valid_3,
+    wrack_ready_0, wrack_ready_1, wrack_ready_2, wrack_ready_3, wrack_ready_4, wrack_ready_5
+);
+
+input [5:0] cfg_axi_mm_select;
+input [17:0] cfg_cport_rfifo_map;
+input [11:0] cfg_cport_type;
+input [17:0] cfg_cport_wfifo_map;
+input [11:0] cfg_port_width;
+input [15:0] cfg_rfifo_cport_map;
+input [15:0] cfg_wfifo_cport_map;
+input cmd_port_clk_0, cmd_port_clk_1, cmd_port_clk_2, cmd_port_clk_3, cmd_port_clk_4, cmd_port_clk_5;
+input cmd_valid_0, cmd_valid_1, cmd_valid_2, cmd_valid_3, cmd_valid_4, cmd_valid_5;
+input [59:0] cmd_data_2;
+output cmd_ready_2;
+input wr_clk_0, wr_clk_1, wr_clk_2, wr_clk_3;
+input wr_valid_0, wr_valid_1, wr_valid_2, wr_valid_3;
+input [89:0] wr_data_3;
+input rd_clk_0, rd_clk_1, rd_clk_2, rd_clk_3;
+input rd_ready_0, rd_ready_1, rd_ready_2, rd_ready_3;
+output [79:0] rd_data_3;
+output rd_valid_3;
+input wrack_ready_0, wrack_ready_1, wrack_ready_2, wrack_ready_3, wrack_ready_4, wrack_ready_5;
+
+endmodule
