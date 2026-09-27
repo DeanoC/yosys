@@ -49,12 +49,15 @@ def main():
     linebank = synthesize(args.yosys, root / "linebank.v", out / "linebank", "linebank")
     assert not any(cell["type"] == "MISTRAL_FF" for cell in linebank["cells"].values()), linebank
     rams = [cell for cell in linebank["cells"].values() if "M10K" in cell["type"]]
-    assert rams, linebank
+    assert len(rams) == 1, f"expected one M10K for the line bank, got {len(rams)}"
+    assert rams[0]["type"] == "MISTRAL_M10K_TDP", rams[0]
     for ram in rams:
         assert async_flag(ram) == 0, ram
         clk2 = ram["connections"].get("CLK2")
         assert clk2 is not None and not is_const(clk2), ram["connections"]
-    print("PASS: Coleco 256x4 registered line bank stays synchronous with a live CLK2")
+        assert ram["connections"]["CLK1"] == linebank["ports"]["clk"]["bits"]
+        assert clk2 == linebank["ports"]["clk"]["bits"]
+    print("PASS: Coleco 256x4 registered line bank shares one synchronous M10K TDP")
 
     sdp = synthesize(args.yosys, root / "sdp.v", out / "sdp", "sdp")
     assert not any(cell["type"] == "MISTRAL_FF" for cell in sdp["cells"].values()), sdp

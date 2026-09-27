@@ -263,14 +263,14 @@ struct SynthIntelALMPass : public ScriptPass {
 							log_error("Cyclone V M10K cannot implement an asynchronous read port in memory %s.%s; use MLAB, logic, or register the read address.\n",
 									log_id(module), log_id(cell));
 				}
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ramstyle=M10K");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ramstyle=m10k");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ram_style=M10K");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt a:ram_style=m10k");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_sync.txt a:ramstyle=M10K");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_sync_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_sync.txt a:ramstyle=m10k");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_sync_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_sync.txt a:ram_style=M10K");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_sync_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_sync.txt a:ram_style=m10k");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_sync_map.v");
 				run("memory_libmap -lib +/intel_alm/common/bram_m10k_tdp_mixed.txt a:ram_style=m10k_tdp_mixed");
 				run("techmap -map +/intel_alm/common/bram_m10k_tdp_mixed_map.v");
 				run("memory_libmap -lib +/intel_alm/common/bram_m10k_tdp_byte.txt a:ram_style=m10k_tdp_byte");
