@@ -40,7 +40,7 @@ module tb;
   end
 endmodule
 TB
-"${YOSYS:-yosys}" -Q -T -p "read_verilog $work/dut.v; proc; opt -nosdff -nodffe; copy gold gate; fsm -nomap gate; write_verilog -noattr $work/netlist.v"
+"${YOSYS:-yosys}" -Q -T -p "read_verilog $work/dut.v; proc; opt -nosdff -nodffe; copy gold gate; fsm -nomap gate; select -assert-count 1 gate/t:\$fsm; write_verilog -noattr $work/netlist.v"
 "${IVERILOG:-iverilog}" -g2012 -s tb -o "$work/model.vvp" \
     "$script_dir/../../techlibs/common/simlib.v" "$work/netlist.v" "$work/tb.v"
 "${VVP:-vvp}" "$work/model.vvp"
