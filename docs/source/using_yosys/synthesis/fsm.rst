@@ -25,6 +25,7 @@ following description:
 -  Does not already have the ``fsm_encoding`` attribute.
 -  Is not an output of the containing module.
 -  Is driven by single `$dff` or `$adff` cell.
+-  Has no defined initialization bits, or a fully defined initialization value.
 -  The ``D``-Input of this `$dff` or `$adff` cell is driven by a multiplexer
    tree that only has constants or the old state value on its leaves.
 -  The state value is only used in the said multiplexer tree or by simple
@@ -48,6 +49,8 @@ The `fsm_extract` pass operates on all state signals marked with the
 information is determined:
 
 -  The state registers
+
+-  The power-up state, if fully specified by register initialization
 
 -  The asynchronous reset state if the state registers use asynchronous reset
 
@@ -101,6 +104,16 @@ transition table. For each state:
 Finally a `$fsm` cell is created with the generated transition table and added
 to the module. This new cell is connected to the control signals and the old
 drivers for the control outputs are disconnected.
+
+A fully specified initial state is retained independently of the reset state,
+including when no transition enters it. Recoding updates its encoding and
+`fsm_map` initializes the replacement flip-flops to that encoding. Partially
+defined initialization is conservatively left unextracted, even with an explicit
+``fsm_encoding`` attribute.
+
+KISS2 export still describes ``STATE_RST`` in its ``.r`` directive. It does not
+represent a distinct power-up state; use RTLIL to retain ``STATE_INIT`` when
+exchanging initialized FSMs.
 
 FSM optimization
 ~~~~~~~~~~~~~~~~

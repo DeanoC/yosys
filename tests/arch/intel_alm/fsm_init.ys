@@ -1,0 +1,27 @@
+# Power-up state differs from synchronous reset. Compare from cycle zero,
+# with arbitrary inputs and reset, including transitions after reset release.
+read_verilog <<EOT
+module initialized_fsm(input clk, reset, step, output boot, active, done);
+  localparam IDLE=3'b000, RUN=3'b010, DONE=3'b101;
+  reg [2:0] state = DONE;
+  always @(posedge clk)
+    if (reset) state <= IDLE;
+    else case (state)
+      IDLE: if (step) state <= RUN;
+      RUN: if (step) state <= DONE;
+      DONE: if (step) state <= IDLE;
+      default: state <= IDLE;
+    endcase
+  assign boot = state == IDLE;
+  assign active = state == RUN;
+  assign done = state == DONE;
+endmodule
+EOT
+hierarchy -top initialized_fsm
+proc
+flatten
+equiv_opt -run :prove -map +/intel_alm/common/alm_sim.v -map +/intel_alm/common/dff_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf
+async2sync
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter

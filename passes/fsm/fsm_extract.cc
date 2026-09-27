@@ -28,12 +28,14 @@
 #include "kernel/consteval.h"
 #include "kernel/celltypes.h"
 #include "fsmdata.h"
+#include "kernel/ffinit.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
 static RTLIL::Module *module;
 static SigMap assign_map;
+static FfInitVals initvals;
 typedef std::pair<RTLIL::IdString, RTLIL::IdString> sig2driver_entry_t;
 static SigSet<sig2driver_entry_t> sig2driver, sig2trigger;
 static std::map<RTLIL::SigBit, std::set<RTLIL::SigBit>> exclusive_ctrls;
@@ -262,6 +264,11 @@ static void extract_fsm(RTLIL::Wire *wire)
 	RTLIL::SigSpec dff_out = assign_map(RTLIL::SigSpec(wire));
 	RTLIL::SigSpec dff_in(RTLIL::State::Sm, wire->width);
 	RTLIL::Const reset_state(RTLIL::State::Sx, wire->width);
+	RTLIL::Const init_state = initvals(dff_out);
+	if (!init_state.is_fully_undef() && !init_state.is_fully_def()) {
+		log("  fsm extraction failed: partially defined initialization.\n");
+		return;
+	}
 
 	RTLIL::SigSpec clk = State::S0;
 	RTLIL::SigSpec arst = State::S0;
@@ -298,6 +305,10 @@ static void extract_fsm(RTLIL::Wire *wire)
 
 	RTLIL::SigSpec ctrl_in;
 	std::map<RTLIL::Const, int> states;
+	if (init_state.is_fully_def()) {
+		log("  found initial state: %s\n", log_signal(init_state));
+		states[init_state] = -1;
+	}
 	if (!arst.is_fully_const()) {
 		log("  found reset state: %s (from async reset)\n", log_signal(reset_state));
 		states[reset_state] = -1;
@@ -347,12 +358,16 @@ static void extract_fsm(RTLIL::Wire *wire)
 	fsm_data.num_outputs = ctrl_out.size();
 	fsm_data.state_bits = wire->width;
 	fsm_data.reset_state = -1;
+	fsm_data.init_state = -1;
 	for (auto &it : states) {
 		it.second = fsm_data.state_table.size();
 		fsm_data.state_table.push_back(it.first);
 	}
 	if (!arst.is_fully_const() || RTLIL::SigSpec(reset_state).is_fully_def())
 		fsm_data.reset_state = states[reset_state];
+
+	if (init_state.is_fully_def())
+		fsm_data.init_state = states.at(init_state);
 
 	// Create transition table
 
@@ -377,6 +392,7 @@ static void extract_fsm(RTLIL::Wire *wire)
 	fsm_cell->setPort(ID::CTRL_OUT, ctrl_out);
 	fsm_cell->parameters[ID::NAME] = RTLIL::Const(wire->name.str());
 	fsm_cell->attributes = wire->attributes;
+	fsm_cell->attributes.erase(ID::init);
 	if(fsm_cell->attributes.count(ID::hdlname)) {
 		auto hdlname = fsm_cell->get_hdlname_attribute();
 		hdlname.pop_back();
@@ -442,6 +458,7 @@ struct FsmExtractPass : public Pass {
 		{
 			module = mod;
 			assign_map.set(module);
+			initvals.set(&assign_map, module);
 
 			sig2driver.clear();
 			sig2trigger.clear();
@@ -477,6 +494,7 @@ struct FsmExtractPass : public Pass {
 				extract_fsm(wire);
 		}
 
+		initvals.clear();
 		assign_map.clear();
 		sig2driver.clear();
 		sig2trigger.clear();

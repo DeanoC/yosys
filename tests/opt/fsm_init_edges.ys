@@ -1,0 +1,53 @@
+# The startup-only state has no incoming transitions and must survive fsm_opt.
+# Async reset deliberately goes to a different state.
+read_verilog <<EOT
+module gold(input clk, reset, step, output boot, active, done);
+  localparam IDLE=3'b000, RUN=3'b010, DONE=3'b101;
+  reg [2:0] state = DONE;
+  always @(posedge clk or posedge reset)
+    if (reset) state <= IDLE;
+    else case (state)
+      IDLE: if (step) state <= RUN;
+      RUN: if (step) state <= IDLE;
+      DONE: state <= IDLE;
+      default: state <= IDLE;
+    endcase
+  assign boot = state == IDLE;
+  assign active = state == RUN;
+  assign done = state == DONE;
+endmodule
+EOT
+proc
+opt -nosdff -nodffe
+copy gold gate
+fsm_detect gate
+fsm_extract gate
+select -assert-count 1 gate/t:$fsm
+fsm_opt gate
+# Save and reload the extracted FSM between encoding variants.
+design -save extracted
+fsm_recode gate
+fsm_map gate
+opt_clean
+async2sync
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+
+# Binary and original encodings must preserve the initial state too.
+design -load extracted
+fsm_recode -encoding binary gate
+fsm_map gate
+opt_clean
+async2sync
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+
+design -load extracted
+fsm_map gate
+opt_clean
+async2sync
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
