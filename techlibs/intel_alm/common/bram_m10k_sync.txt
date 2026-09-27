@@ -1,0 +1,85 @@
+# Registered ramstyle=M10K memories. Cost 110 sits above ACLR SDP
+# cells (100), preserving dedicated zero-valued read-output reset mapping.
+ram block $__MISTRAL_M10K_SYNC_10_ {
+ abits 10;
+ width 10;
+ cost 110;
+ init any;
+ style "m10k";
+ port sw "W" {
+  clock posedge;
+  clken;
+ }
+ port sr "R" {
+  clock posedge;
+  clken;
+  rden;
+ }
+}
+
+ram block $__MISTRAL_M10K_SYNC_20_ {
+ abits 9;
+ width 20;
+ cost 110;
+ init any;
+ style "m10k";
+ port sw "W" {
+  clock posedge;
+  clken;
+ }
+ port sr "R" {
+  clock posedge;
+  clken;
+  rden;
+ }
+}
+
+ram block $__MISTRAL_M10K_SYNC_40_ {
+ abits 8;
+ width 40;
+ cost 110;
+ init any;
+ style "m10k";
+ port sw "W" {
+  clock posedge;
+  clken;
+ }
+ port sr "R" {
+  clock posedge;
+  clken;
+  rden;
+ }
+}
+
+ram block $__MISTRAL_M10K_SYNC_BYTE_ {
+ abits 9;
+ width 20;
+ byte 10;
+ cost 110;
+ init any;
+ style "m10k";
+ port sw "W" {
+  clock posedge;
+  clken;
+  wrbe_separate;
+ }
+ port sr "R" {
+  clock posedge;
+  clken;
+  rden;
+ }
+}
+
+# Two registered read/write ports. Cost 140 is above one SYNC/ACLR SDP
+# and below two SDP cells, so two-read line banks share one TDP.
+ram block $__MISTRAL_M10K_SYNC_TDP_ {
+ abits 10;
+ widths 10 20 global;
+ cost 140;
+ init any;
+ style "m10k";
+ port srsw "A" "B" {
+  clock posedge;
+  clken;
+ }
+}

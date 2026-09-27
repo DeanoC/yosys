@@ -243,14 +243,34 @@ struct SynthIntelALMPass : public ScriptPass {
 
 		if (!nobram && check_label("map_bram", "(skip if -nobram)")) {
 			if (bram_type == "m10k") {
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_async.txt a:ramstyle=M10K");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_async_map.v");
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_async.txt a:ramstyle=m10k");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_async_map.v");
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_async.txt a:ram_style=M10K");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_async_map.v");
-				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_async.txt a:ram_style=m10k");
-				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_async_map.v");
+				// Cyclone V M10K always registers its read address. The
+				// optional unregistered output is still a synchronous read;
+				// only MLAB implements a flow-through asynchronous read.
+				// Fail forced M10K memories before an unsupported library rule
+				// or a large, silent logic fallback can hide the mismatch.
+				for (auto module : active_design->selected_whole_modules())
+				for (auto cell : module->selected_cells()) {
+					if (cell->type != ID($mem_v2))
+						continue;
+					std::string style = cell->get_string_attribute(ID(ramstyle));
+					if (style.empty())
+						style = cell->get_string_attribute(ID(ram_style));
+					if (style != "M10K" && style != "m10k")
+						continue;
+					auto read_clocks = cell->getParam(ID::RD_CLK_ENABLE);
+					for (int i = 0; i < read_clocks.size(); i++)
+						if (read_clocks[i] != State::S1)
+							log_error("Cyclone V M10K cannot implement an asynchronous read port in memory %s.%s; use MLAB, logic, or register the read address.\n",
+									log_id(module), log_id(cell));
+				}
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_sync.txt a:ramstyle=M10K");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_sync_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_sync.txt a:ramstyle=m10k");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_sync_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_sync.txt a:ram_style=M10K");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_sync_map.v");
+				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_sync.txt a:ram_style=m10k");
+				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_sync_map.v");
 				run("memory_libmap -lib +/intel_alm/common/bram_m10k_tdp_mixed.txt a:ram_style=m10k_tdp_mixed");
 				run("techmap -map +/intel_alm/common/bram_m10k_tdp_mixed_map.v");
 				run("memory_libmap -lib +/intel_alm/common/bram_m10k_tdp_byte.txt a:ram_style=m10k_tdp_byte");

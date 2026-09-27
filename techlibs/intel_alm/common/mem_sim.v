@@ -90,9 +90,8 @@ parameter CFG_DUAL_CLOCK = 0;
 // Byte-enable mode uses two physical M10K write lanes and an active-high
 // logical write enable. The default keeps the original active-low contract.
 parameter CFG_BYTE_ENABLE = 0;
-// Flow-through simple-dual mode keeps writes on CLK1 while exposing the B
-// address directly to the read data.  The mapper ties B1EN high and leaves
-// CLK2 unused in this mode.
+// Legacy simulation-only mode. Cyclone V M10K cannot implement a
+// combinational read; synth_intel_alm and nextpnr reject this configuration.
 parameter CFG_ASYNC_READ = 0;
 
 (* clkbuf_sink *) input CLK1;
@@ -125,6 +124,8 @@ endspecify
 `endif
 
 generate if (CFG_ASYNC_READ) begin: async_read
+    // This branch models the requested RTL semantics for simulation only.
+    // It must not be interpreted as a realizable Cyclone V M10K setting.
     localparam [(1 << CFG_ABITS)*CFG_DBITS-1:0] INIT_DATA = INIT;
     reg [CFG_DBITS-1:0] mem [0:(1 << CFG_ABITS)-1];
     integer i;
@@ -231,6 +232,7 @@ input [1:0] A1BE, B1BE;
 output reg [CFG_DBITS-1:0] A1Q;
 output reg [CFG_RD_DBITS-1:0] B1Q;
 generate if (CFG_ASYNC_READ) begin: async_read
+// Simulation-only RTL semantics; the physical M10K read address is clocked.
 reg [CFG_DBITS-1:0] mem [0:(1 << CFG_ABITS)-1];
 integer i;
 initial for (i = 0; i < (1 << CFG_ABITS); i = i + 1)
