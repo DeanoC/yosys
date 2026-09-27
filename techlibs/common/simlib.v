@@ -2700,6 +2700,7 @@ parameter STATE_BITS = 1;
 parameter STATE_NUM = 1;
 parameter STATE_NUM_LOG2 = 1;
 parameter STATE_RST = 0;
+parameter STATE_INIT = -1;
 parameter STATE_TABLE = 1'b0;
 
 parameter TRANS_NUM = 1;
@@ -2715,6 +2716,14 @@ wire pos_arst = ARST == ARST_POLARITY;
 reg [STATE_BITS-1:0] state;
 reg [STATE_BITS-1:0] state_tmp;
 reg [STATE_BITS-1:0] next_state;
+
+genvar init_bit;
+generate if (STATE_INIT >= 0) begin
+	localparam [STATE_BITS-1:0] INIT_CODE = STATE_TABLE >> (STATE_BITS * STATE_INIT);
+	for (init_bit = 0; init_bit < STATE_BITS; init_bit = init_bit + 1) begin
+		initial state[init_bit] = INIT_CODE[init_bit] === 1'b1;
+	end
+end endgenerate
 
 reg [STATE_BITS-1:0] tr_state_in;
 reg [STATE_BITS-1:0] tr_state_out;

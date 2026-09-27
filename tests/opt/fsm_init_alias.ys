@@ -1,0 +1,31 @@
+# Initialization on an alias, with no reset input.
+read_verilog <<EOT
+module gold(input clk, step, output boot, active, done);
+  localparam IDLE=3'b000, RUN=3'b010, DONE=3'b101;
+  (* fsm_encoding = "auto" *) reg [2:0] state;
+  (* init = 3'b101 *) wire [2:0] state_alias = state;
+  always @(posedge clk)
+    case (state)
+      IDLE: if (step) state <= RUN;
+      RUN: if (step) state <= DONE;
+      DONE: if (step) state <= IDLE;
+      default: state <= IDLE;
+    endcase
+  assign boot = state == IDLE;
+  assign active = state == RUN;
+  assign done = state == DONE;
+endmodule
+EOT
+proc
+opt -nosdff -nodffe
+copy gold gate
+fsm_detect gate
+fsm_extract gate
+select -assert-count 1 gate/t:$fsm
+fsm_opt gate
+fsm_recode gate
+fsm_map gate
+opt_clean
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter

@@ -23,12 +23,14 @@
 #include "kernel/consteval.h"
 #include "kernel/celltypes.h"
 #include "fsmdata.h"
+#include "kernel/ffinit.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
 static RTLIL::Module *module;
 static SigMap assign_map;
+static FfInitVals initvals;
 typedef std::pair<RTLIL::Cell*, RTLIL::IdString> sig2driver_entry_t;
 static SigSet<sig2driver_entry_t> sig2driver, sig2user;
 static std::set<RTLIL::Cell*> muxtree_cells;
@@ -122,7 +124,8 @@ static void detect_fsm(RTLIL::Wire *wire, bool ignore_self_reset=false)
 {
 	bool has_fsm_encoding_attr = wire->attributes.count(ID::fsm_encoding) > 0 && wire->attributes.at(ID::fsm_encoding).decode_string() != "none";
 	bool has_fsm_encoding_none = wire->attributes.count(ID::fsm_encoding) > 0 && wire->attributes.at(ID::fsm_encoding).decode_string() == "none";
-	bool has_init_attr = wire->attributes.count(ID::init) > 0;
+	Const init = initvals(SigSpec(wire));
+	bool unsupported_init = !init.is_fully_undef() && !init.is_fully_def();
 	bool is_module_port = sig_at_port.check_any(assign_map(RTLIL::SigSpec(wire)));
 	bool looks_like_state_reg = false, looks_like_good_state_reg = false;
 	bool is_self_resetting = false;
@@ -220,8 +223,8 @@ static void detect_fsm(RTLIL::Wire *wire, bool ignore_self_reset=false)
 		if (!looks_like_good_state_reg)
 			warnings.push_back("Users of state reg look like FSM recoding might result in larger circuit.\n");
 
-		if (has_init_attr)
-			warnings.push_back("Initialization value on FSM state register is ignored. Possible simulation-synthesis mismatch!\n");
+		if (unsupported_init)
+			warnings.push_back("Partially defined initialization is not supported by FSM extraction.\n");
 
 		if (!looks_like_state_reg)
 			warnings.push_back("Doesn't look like a proper FSM. Possible simulation-synthesis mismatch!\n");
@@ -238,7 +241,7 @@ static void detect_fsm(RTLIL::Wire *wire, bool ignore_self_reset=false)
 		}
 	}
 	else
-	if (looks_like_state_reg && looks_like_good_state_reg && !has_init_attr && !is_module_port && !is_self_resetting)
+	if (looks_like_state_reg && looks_like_good_state_reg && !unsupported_init && !is_module_port && !is_self_resetting)
 	{
 		log("Found FSM state register %s.%s.\n", wire->module, wire);
 		wire->attributes[ID::fsm_encoding] = RTLIL::Const("auto");
@@ -254,8 +257,8 @@ static void detect_fsm(RTLIL::Wire *wire, bool ignore_self_reset=false)
 		if (!looks_like_good_state_reg)
 			log("    Users of register don't seem to benefit from recoding.\n");
 
-		if (has_init_attr)
-			log("    Register has an initialization value.\n");
+		if (unsupported_init)
+			log("    Register has a partially defined initialization value.\n");
 
 		if (is_self_resetting)
 			log("    Circuit seems to be self-resetting.\n");
@@ -320,6 +323,7 @@ struct FsmDetectPass : public Pass {
 		{
 			module = mod;
 			assign_map.set(module);
+			initvals.set(&assign_map, module);
 
 			sig2driver.clear();
 			sig2user.clear();
@@ -346,6 +350,7 @@ struct FsmDetectPass : public Pass {
 				detect_fsm(wire, ignore_self_reset);
 		}
 
+		initvals.clear();
 		assign_map.clear();
 		sig2driver.clear();
 		sig2user.clear();
