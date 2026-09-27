@@ -15,5 +15,5 @@ python3 tests/arch/intel_alm/m10k_registered/regression.py \
   --yosys /path/to/yosys --output /tmp/m10k-registered
 ```
 
-Combinational-read coverage stays in `m10k_async_read`. This test does not
-claim hardware acceptance.
+The `m10k_async_read` regression checks that forced combinational-read
+memories fail synthesis. This test does not claim hardware acceptance.
