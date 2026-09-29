@@ -169,6 +169,15 @@ static void map_fsm(RTLIL::Cell *fsm_cell, RTLIL::Module *module)
 	RTLIL::Wire *state_wire = module->addWire(module->uniquify(fsm_cell->parameters[ID::NAME].decode_string()), fsm_data.state_bits);
 	RTLIL::Wire *next_state_wire = module->addWire(NEW_ID, fsm_data.state_bits);
 
+	if (fsm_data.init_state >= 0) {
+		// One-hot codes use Sa for inactive bits; power-up must use zero.
+		Const init = fsm_data.state_table.at(fsm_data.init_state);
+		for (int i = 0; i < GetSize(init); i++)
+			if (init[i] != State::S1)
+				init.set(i, State::S0);
+		state_wire->attributes[ID::init] = init;
+	}
+
 	RTLIL::Cell *state_dff = module->addCell(NEW_ID, "");
 	if (fsm_cell->getPort(ID::ARST).is_fully_const()) {
 		state_dff->type = ID($dff);

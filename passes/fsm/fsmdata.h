@@ -28,6 +28,7 @@ YOSYS_NAMESPACE_BEGIN
 struct FsmData
 {
 	int num_inputs, num_outputs, state_bits, reset_state;
+	int init_state = -1;
 	struct transition_t { int state_in, state_out; RTLIL::Const ctrl_in, ctrl_out; };
 	std::vector<transition_t> transition_table;
 	std::vector<RTLIL::Const> state_table;
@@ -46,6 +47,7 @@ struct FsmData
 		cell->parameters[ID::STATE_NUM] = RTLIL::Const(state_table.size());
 		cell->parameters[ID::STATE_NUM_LOG2] = RTLIL::Const(state_num_log2);
 		cell->parameters[ID::STATE_RST] = RTLIL::Const(reset_state);
+		cell->parameters[ID::STATE_INIT] = RTLIL::Const(init_state);
 		RTLIL::Const cell_state_table;
 		for (const RTLIL::Const &c : state_table)
 			cell_state_table.append(c);
@@ -76,6 +78,7 @@ struct FsmData
 
 		state_bits = cell->parameters[ID::STATE_BITS].as_int();
 		reset_state = cell->parameters[ID::STATE_RST].as_int();
+		init_state = cell->hasParam(ID::STATE_INIT) ? cell->getParam(ID::STATE_INIT).as_int() : -1;
 
 		int state_num = cell->parameters[ID::STATE_NUM].as_int();
 		int state_num_log2 = cell->parameters[ID::STATE_NUM_LOG2].as_int();
@@ -83,6 +86,8 @@ struct FsmData
 
 		if (reset_state < 0 || reset_state >= state_num)
 			reset_state = -1;
+
+		log_assert(init_state >= -1 && init_state < state_num);
 
 		const RTLIL::Const &state_table = cell->parameters[ID::STATE_TABLE];
 		const RTLIL::Const &trans_table = cell->parameters[ID::TRANS_TABLE];
@@ -141,8 +146,9 @@ struct FsmData
 		log("\n");
 		log("  State encoding:\n");
 		for (int i = 0; i < GetSize(state_table); i++)
-			log("  %3d: %10s%s\n", i, log_signal(state_table[i], false),
-					int(i) == reset_state ? "  <RESET STATE>" : "");
+			log("  %3d: %10s%s%s\n", i, log_signal(state_table[i], false),
+					int(i) == reset_state ? "  <RESET STATE>" : "",
+					int(i) == init_state ? "  <INITIAL STATE>" : "");
 
 		log("\n");
 		log("  Transition Table (state_in, ctrl_in, state_out, ctrl_out):\n");

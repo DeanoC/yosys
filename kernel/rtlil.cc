@@ -2112,6 +2112,8 @@ namespace {
 				param(ID::STATE_NUM);
 				param(ID::STATE_NUM_LOG2);
 				param(ID::STATE_RST);
+				if (cell->hasParam(ID::STATE_INIT))
+					param(ID::STATE_INIT);
 				param_bits(ID::STATE_TABLE, param(ID::STATE_BITS) * param(ID::STATE_NUM));
 				param(ID::TRANS_NUM);
 				param_bits(ID::TRANS_TABLE, param(ID::TRANS_NUM) * (2*param(ID::STATE_NUM_LOG2) + param(ID::CTRL_IN_WIDTH) + param(ID::CTRL_OUT_WIDTH)));

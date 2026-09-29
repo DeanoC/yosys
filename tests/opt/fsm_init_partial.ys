@@ -1,0 +1,23 @@
+# Partial initialization must remain unextracted even with explicit encoding.
+read_verilog <<EOT
+module top(input clk, step, output active, done);
+  (* fsm_encoding = "auto" *) reg [2:0] state = 3'bx01;
+  always @(posedge clk)
+    case (state)
+      3'b000: if (step) state <= 3'b010;
+      3'b010: if (step) state <= 3'b101;
+      3'b101: if (step) state <= 3'b000;
+      default: state <= 3'b000;
+    endcase
+  assign active = state == 3'b010;
+  assign done = state == 3'b101;
+endmodule
+EOT
+proc
+opt -nosdff -nodffe
+fsm_detect
+fsm_extract
+select -assert-none t:$fsm
+select -assert-count 1 t:$dff
+# The original initial condition remains available to subsequent passes.
+select -assert-count 1 a:init=3'bx01

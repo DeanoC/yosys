@@ -45,7 +45,7 @@ struct FsmOpt
 			std::map<int, int> old_to_new_state;
 
 			for (int i = 0; i < GetSize(fsm_data.state_table); i++)
-				if (i != fsm_data.reset_state)
+				if (i != fsm_data.reset_state && i != fsm_data.init_state)
 					unreachable_states.insert(i);
 
 			for (auto &trans : fsm_data.transition_table)
@@ -75,6 +75,8 @@ struct FsmOpt
 			new_state_table.swap(fsm_data.state_table);
 			if (fsm_data.reset_state != -1)
 				fsm_data.reset_state = old_to_new_state.at(fsm_data.reset_state);
+			if (fsm_data.init_state != -1)
+				fsm_data.init_state = old_to_new_state.at(fsm_data.init_state);
 		}
 	}
 
