@@ -25,7 +25,10 @@
 #include "kernel/register.h"
 #include "kernel/celltypes.h"
 #include "kernel/rtlil.h"
+#include "kernel/sigtools.h"
 #include "kernel/log.h"
+
+#include <algorithm>
 
 // abc9_exe.cc
 std::string fold_abc9_cmd(std::string str);
@@ -151,6 +154,18 @@ struct Abc9Pass : public ScriptPass
 		log("        also pass $_DFF_[NP]_ cells through to ABC. modules with many clock\n");
 		log("        domains are supported and automatically partitioned by ABC.\n");
 		log("\n");
+		log("    -isolate\n");
+		log("        map each disconnected combinational cone with its own ABC network so\n");
+		log("        a change in one cone does not change the mapping of another. This is\n");
+		log("        the default. Combinational abc9 boxes stay inside the cone that\n");
+		log("        contains them. Common subexpressions that exist only after ABC's\n");
+		log("        rewriting are not shared across cones. Ignored with -dff: sequential\n");
+		log("        correspondence needs one network. Override the default with the\n");
+		log("        abc9.isolate scratchpad.\n");
+		log("\n");
+		log("    -noisolate\n");
+		log("        map each selected module as a single ABC network.\n");
+		log("\n");
 		log("    -nocleanup\n");
 		log("        when this option is used, the temporary files created by this pass\n");
 		log("        are not removed. this is useful for debugging.\n");
@@ -176,10 +191,12 @@ struct Abc9Pass : public ScriptPass
 	}
 
 	std::stringstream exe_cmd;
-	bool dff_mode, cleanup;
+	bool dff_mode, cleanup, isolate;
 	bool lut_mode;
 	int maxlut;
 	std::string box_file;
+
+	bool abc9_try_isolate(RTLIL::Module *mod);
 
 	void clear_flags() override
 	{
@@ -187,6 +204,7 @@ struct Abc9Pass : public ScriptPass
 		exe_cmd << "abc9_exe";
 		dff_mode = false;
 		cleanup = true;
+		isolate = true;
 		lut_mode = false;
 		maxlut = 0;
 		box_file = "";
@@ -200,6 +218,7 @@ struct Abc9Pass : public ScriptPass
 		// get arguments from scratchpad first, then override by command arguments
 		dff_mode = design->scratchpad_get_bool("abc9.dff", dff_mode);
 		cleanup = !design->scratchpad_get_bool("abc9.nocleanup", !cleanup);
+		isolate = design->scratchpad_get_bool("abc9.isolate", isolate);
 
 		if (design->scratchpad_get_bool("abc9.debug")) {
 			cleanup = false;
@@ -226,6 +245,14 @@ struct Abc9Pass : public ScriptPass
 				exe_cmd << " " << arg;
 				continue;
 			}
+			if (arg == "-isolate") {
+				isolate = true;
+				continue;
+			}
+			if (arg == "-noisolate") {
+				isolate = false;
+				continue;
+			}
 			if (arg == "-nocleanup") {
 				cleanup = false;
 				continue;
@@ -249,6 +276,10 @@ struct Abc9Pass : public ScriptPass
 			break;
 		}
 		extra_args(args, argidx, design);
+
+		// &scorr on a split network cannot see flops that were cut into primary pins.
+		if (dff_mode)
+			isolate = false;
 
 		if (maxlut && lut_mode)
 			log_cmd_error("abc9 '-maxlut' option only applicable without '-lut' nor '-luts'.\n");
@@ -397,6 +428,13 @@ struct Abc9Pass : public ScriptPass
 					if (!active_design->selected_whole_module(mod))
 						log_error("Can't handle partially selected module %s!\n", mod);
 
+					if (isolate && abc9_try_isolate(mod)) {
+						mod->check();
+						active_design->selection().selected_modules.clear();
+						log_pop();
+						continue;
+					}
+
 					std::string tempdir_name;
 					if (cleanup)
 						tempdir_name = get_base_tmpdir() + "/";
@@ -460,5 +498,688 @@ struct Abc9Pass : public ScriptPass
 		}
 	}
 } Abc9Pass;
+
+// Lexicographic cell/port order. IdString::operator< follows intern order, which
+// shifts when an unrelated name is created first.
+struct Abc9BitKey {
+	RTLIL::IdString cell, port;
+	int index = 0;
+};
+
+static bool abc9_key_less(const Abc9BitKey &a, const Abc9BitKey &b)
+{
+	if (a.cell != b.cell)
+		return a.cell.lt_by_name(b.cell);
+	if (a.port != b.port)
+		return a.port.lt_by_name(b.port);
+	return a.index < b.index;
+}
+
+// Public net, port, or cell pin. Private aigmap names are not anchors: they
+// move when an unrelated cone allocates a different number of ids.
+struct Abc9Anchor {
+	RTLIL::IdString name, port;
+	int index = 0;
+};
+
+static bool abc9_anchor_less(const Abc9Anchor &a, const Abc9Anchor &b)
+{
+	if (a.name != b.name)
+		return a.name.lt_by_name(b.name);
+	if (a.port != b.port)
+		return a.port.lt_by_name(b.port);
+	return a.index < b.index;
+}
+
+static void abc9_sort_anchors(std::vector<Abc9Anchor> &anchors)
+{
+	std::sort(anchors.begin(), anchors.end(), abc9_anchor_less);
+	anchors.erase(std::unique(anchors.begin(), anchors.end(), [](const Abc9Anchor &a, const Abc9Anchor &b) {
+		return !abc9_anchor_less(a, b) && !abc9_anchor_less(b, a);
+	}), anchors.end());
+}
+
+static bool abc9_anchors_less(const std::vector<Abc9Anchor> &a, const std::vector<Abc9Anchor> &b)
+{
+	int n = std::min(GetSize(a), GetSize(b));
+	for (int i = 0; i < n; i++) {
+		if (abc9_anchor_less(a[i], b[i]))
+			return true;
+		if (abc9_anchor_less(b[i], a[i]))
+			return false;
+	}
+	return GetSize(a) < GetSize(b);
+}
+
+static RTLIL::IdString abc9_cone_wire_name(RTLIL::SigBit bit, const char *kind)
+{
+	std::string unescaped = bit.wire->name.unescape();
+	return stringf("$abc9%s$%s$%d", kind, unescaped.c_str(), bit.offset);
+}
+
+bool Abc9Pass::abc9_try_isolate(RTLIL::Module *mod)
+{
+	// This pass keeps IdString values and cell pointers across nested
+	// write_xaiger / abc9_exe / read_aiger calls. A collection between those
+	// calls is unsafe, and on a large module it also dominates runtime.
+	GarbageCollectionGuard gc_guard(false);
+
+	// No new RTLIL ids on this path: a one-cone module must stay byte-identical.
+	if (mod->memories.size() || mod->processes.size())
+		return false;
+
+	auto is_cone_cell = [&](RTLIL::Cell *cell) {
+		if (cell->has_keep_attr())
+			return false;
+		if (cell->type.in(ID($_AND_), ID($_NOT_)))
+			return true;
+		if (!cell->attributes.count(ID::abc9_box_seq))
+			return false;
+		RTLIL::Module *inst = active_design->module(cell->type);
+		if (!inst || !inst->get_bool_attribute(ID::abc9_box))
+			return false;
+		if (inst->get_bool_attribute(ID::abc9_flop))
+			return false;
+		return true;
+	};
+
+	std::vector<RTLIL::Cell*> cone_cells;
+	for (auto cell : mod->cells())
+		if (is_cone_cell(cell))
+			cone_cells.push_back(cell);
+	if (GetSize(cone_cells) <= 1)
+		return false;
+
+	SigMap sigmap(mod);
+	for (auto wire : mod->wires())
+		if (wire->name.isPublic())
+			sigmap.add(wire);
+	for (auto wire : mod->wires())
+		if (wire->port_input)
+			sigmap.add(wire);
+	for (auto wire : mod->wires())
+		if (wire->get_bool_attribute(ID::keep))
+			sigmap.add(wire);
+
+	pool<RTLIL::Cell*> cone_set;
+	for (auto cell : cone_cells)
+		cone_set.insert(cell);
+
+	// A canonical bit escapes the cone when a port, a keep wire, or a
+	// non-cone cell reads it. Flops and SCC breakers are those readers.
+	pool<RTLIL::SigBit> external;
+	dict<RTLIL::SigBit, std::vector<Abc9Anchor>> public_anchors, any_anchors;
+	auto add_anchor = [&](RTLIL::SigBit canon, RTLIL::IdString name, RTLIL::IdString port, int index) {
+		if (!canon.wire)
+			return;
+		Abc9Anchor anchor;
+		anchor.name = name;
+		anchor.port = port;
+		anchor.index = index;
+		any_anchors[canon].push_back(anchor);
+		if (name.isPublic())
+			public_anchors[canon].push_back(anchor);
+	};
+	for (auto wire : mod->wires()) {
+		if (wire->port_output || wire->get_bool_attribute(ID::keep)) {
+			for (int i = 0; i < GetSize(wire); i++) {
+				RTLIL::SigBit bit = sigmap(RTLIL::SigBit(wire, i));
+				if (bit.wire)
+					external.insert(bit);
+			}
+		}
+		if (!wire->name.isPublic())
+			continue;
+		RTLIL::IdString kind = wire->port_input && wire->port_output ? RTLIL::IdString("\\inout") :
+				wire->port_input ? RTLIL::IdString("\\portin") :
+				wire->port_output ? RTLIL::IdString("\\portout") : RTLIL::IdString("\\net");
+		for (int i = 0; i < GetSize(wire); i++)
+			add_anchor(sigmap(RTLIL::SigBit(wire, i)), wire->name, kind, i);
+	}
+	for (auto cell : mod->cells()) {
+		if (cone_set.count(cell))
+			continue;
+		for (auto &conn : cell->connections()) {
+			bool is_in = cell->input(conn.first);
+			bool is_out = cell->output(conn.first);
+			if (!is_in && !is_out)
+				is_in = true;
+			int index = 0;
+			for (auto bit : conn.second) {
+				int bit_index = index++;
+				if (!bit.wire)
+					continue;
+				RTLIL::SigBit canon = sigmap(bit);
+				if (!canon.wire)
+					continue;
+				if (is_in)
+					external.insert(canon);
+				add_anchor(canon, cell->name, conn.first, bit_index);
+			}
+		}
+	}
+
+	struct Pin {
+		RTLIL::SigBit canon, orig;
+		Abc9BitKey key;
+		bool is_in = false, is_out = false;
+	};
+	std::vector<std::vector<Pin>> pins(cone_cells.size());
+	RTLIL::IdString bad_cell, bad_port;
+	bool bad = false;
+
+	for (int ci = 0; ci < GetSize(cone_cells); ci++) {
+		RTLIL::Cell *cell = cone_cells[ci];
+		for (auto &conn : cell->connections()) {
+			bool is_in = cell->input(conn.first);
+			bool is_out = cell->output(conn.first);
+			if (!is_in && !is_out) {
+				if (!bad) {
+					bad = true;
+					bad_cell = cell->name;
+					bad_port = conn.first;
+				}
+				continue;
+			}
+			for (int i = 0; i < GetSize(conn.second); i++) {
+				RTLIL::SigBit orig = conn.second[i];
+				if (!orig.wire)
+					continue;
+				RTLIL::SigBit canon = sigmap(orig);
+				if (!canon.wire)
+					continue;
+				Pin pin;
+				pin.canon = canon;
+				pin.orig = orig;
+				pin.key = {cell->name, conn.first, i};
+				pin.is_in = is_in;
+				pin.is_out = is_out;
+				pins[ci].push_back(pin);
+			}
+		}
+	}
+
+	dict<RTLIL::SigBit, std::vector<int>> driver_cells, user_cells;
+	for (int ci = 0; ci < GetSize(cone_cells); ci++) {
+		for (auto &pin : pins[ci]) {
+			if (pin.is_out)
+				driver_cells[pin.canon].push_back(ci);
+			if (pin.is_in)
+				user_cells[pin.canon].push_back(ci);
+		}
+	}
+
+	struct UnionFind {
+		std::vector<int> parent, rank;
+		UnionFind(int n) : parent(n), rank(n, 0) {
+			for (int i = 0; i < n; i++)
+				parent[i] = i;
+		}
+		int find(int x) {
+			int root = x;
+			while (parent[root] != root)
+				root = parent[root];
+			while (parent[x] != root) {
+				int next = parent[x];
+				parent[x] = root;
+				x = next;
+			}
+			return root;
+		}
+		void unite(int a, int b) {
+			a = find(a);
+			b = find(b);
+			if (a == b)
+				return;
+			if (rank[a] < rank[b])
+				std::swap(a, b);
+			parent[b] = a;
+			if (rank[a] == rank[b])
+				rank[a]++;
+		}
+	} uf(GetSize(cone_cells));
+
+	for (auto &it : driver_cells) {
+		auto &drivers = it.second;
+		for (int i = 1; i < GetSize(drivers); i++)
+			uf.unite(drivers[0], drivers[i]);
+		auto users = user_cells.find(it.first);
+		if (users == user_cells.end())
+			continue;
+		for (int user : users->second)
+			uf.unite(drivers[0], user);
+	}
+	driver_cells.clear();
+	user_cells.clear();
+
+	dict<int, std::vector<int>> raw_groups;
+	for (int ci = 0; ci < GetSize(cone_cells); ci++)
+		raw_groups[uf.find(ci)].push_back(ci);
+	if (GetSize(raw_groups) <= 1)
+		return false;
+	if (bad)
+		log_error("ABC9 isolate: port %s on cell %s is neither an input nor an output.\n",
+				bad_port, bad_cell);
+
+	struct Group {
+		RTLIL::IdString min_name;
+		std::vector<int> members;
+	};
+	std::vector<Group> groups;
+	groups.reserve(raw_groups.size());
+	int largest = 0;
+	for (auto &it : raw_groups) {
+		Group group;
+		group.members = std::move(it.second);
+		group.min_name = cone_cells[group.members[0]]->name;
+		for (int idx : group.members)
+			if (cone_cells[idx]->name.lt_by_name(group.min_name))
+				group.min_name = cone_cells[idx]->name;
+		if (GetSize(group.members) > largest)
+			largest = GetSize(group.members);
+		groups.push_back(std::move(group));
+	}
+	std::sort(groups.begin(), groups.end(), [](const Group &a, const Group &b) {
+		return a.min_name.lt_by_name(b.min_name);
+	});
+
+	struct PortInfo {
+		bool is_output = false;
+		Abc9BitKey key;
+		RTLIL::Wire *cone_wire = nullptr;
+		RTLIL::SigBit parent_bit;
+		std::vector<RTLIL::SigBit> originals;
+		std::vector<Abc9Anchor> anchors;
+	};
+	struct Cone {
+		RTLIL::Module *mod = nullptr;
+		int abc_index = -1;
+		bool has_box = false;
+		std::vector<PortInfo> ports;
+		dict<RTLIL::SigBit, RTLIL::Wire*> canon_wire;
+	};
+	std::vector<Cone> cones;
+	cones.reserve(groups.size());
+
+	for (int gi = 0; gi < GetSize(groups); gi++) {
+		Group &group = groups[gi];
+		// Cell-dict order follows insertion and erasure, so an unrelated cone
+		// can reshuffle it. Name order keeps this cone's AIG walk stable.
+		std::sort(group.members.begin(), group.members.end(), [&](int a, int b) {
+			return cone_cells[a]->name.lt_by_name(cone_cells[b]->name);
+		});
+		Cone cone;
+		RTLIL::IdString cone_name = stringf("\\abc9cone_%d", gi);
+		if (active_design->module(cone_name))
+			log_error("ABC9 isolate: module %s already exists.\n", cone_name);
+		cone.mod = active_design->addModule(cone_name);
+
+		struct BitRec {
+			RTLIL::SigBit canon;
+			bool driven = false, used = false;
+			bool have_driver = false, have_user = false;
+			Abc9BitKey driver_key, user_key;
+			std::vector<RTLIL::SigBit> originals;
+		};
+		dict<RTLIL::SigBit, BitRec> recs;
+		for (int idx : group.members) {
+			if (cone_cells[idx]->attributes.count(ID::abc9_box_seq))
+				cone.has_box = true;
+			for (auto &pin : pins[idx]) {
+				BitRec &rec = recs[pin.canon];
+				rec.canon = pin.canon;
+				if (pin.is_out) {
+					rec.driven = true;
+					rec.originals.push_back(pin.orig);
+					if (!rec.have_driver || abc9_key_less(pin.key, rec.driver_key)) {
+						rec.driver_key = pin.key;
+						rec.have_driver = true;
+					}
+				}
+				if (pin.is_in) {
+					rec.used = true;
+					if (!rec.have_user || abc9_key_less(pin.key, rec.user_key)) {
+						rec.user_key = pin.key;
+						rec.have_user = true;
+					}
+				}
+			}
+		}
+
+		auto anchors_for = [&](RTLIL::SigBit bit) {
+			std::vector<Abc9Anchor> key;
+			auto pub = public_anchors.find(bit);
+			if (pub != public_anchors.end() && !pub->second.empty())
+				key = pub->second;
+			else {
+				auto any = any_anchors.find(bit);
+				if (any != any_anchors.end())
+					key = any->second;
+			}
+			abc9_sort_anchors(key);
+			return key;
+		};
+		std::vector<RTLIL::SigBit> internals;
+		for (auto &it : recs) {
+			BitRec &rec = it.second;
+			if (rec.driven && external.count(rec.canon)) {
+				log_assert(rec.have_driver);
+				PortInfo port;
+				port.is_output = true;
+				port.key = rec.driver_key;
+				port.parent_bit = rec.canon;
+				port.originals = std::move(rec.originals);
+				port.anchors = anchors_for(rec.canon);
+				cone.ports.push_back(std::move(port));
+			} else if (rec.driven) {
+				internals.push_back(rec.canon);
+			} else if (rec.used) {
+				log_assert(rec.have_user);
+				PortInfo port;
+				port.is_output = false;
+				port.key = rec.user_key;
+				port.parent_bit = rec.canon;
+				port.anchors = anchors_for(rec.canon);
+				cone.ports.push_back(std::move(port));
+			}
+		}
+		std::sort(cone.ports.begin(), cone.ports.end(), [](const PortInfo &a, const PortInfo &b) {
+			if (a.is_output != b.is_output)
+				return !a.is_output;
+			// PI/PO order is part of the ABC network. Anchor it to public
+			// nets and cell pins. aigmap's private wire names move when
+			// another cone uses a different number of ids.
+			if (abc9_anchors_less(a.anchors, b.anchors))
+				return true;
+			if (abc9_anchors_less(b.anchors, a.anchors))
+				return false;
+			RTLIL::IdString an, bn;
+			if (a.parent_bit.wire)
+				an = a.parent_bit.wire->name;
+			if (b.parent_bit.wire)
+				bn = b.parent_bit.wire->name;
+			if (an != bn)
+				return an.lt_by_name(bn);
+			if (a.parent_bit.offset != b.parent_bit.offset)
+				return a.parent_bit.offset < b.parent_bit.offset;
+			return abc9_key_less(a.key, b.key);
+		});
+
+		int port_id = 1;
+		for (auto &port : cone.ports) {
+			RTLIL::IdString wname = abc9_cone_wire_name(port.parent_bit, "b");
+			if (cone.mod->wire(wname))
+				log_error("ABC9 isolate: duplicate boundary wire %s.\n", wname);
+			RTLIL::Wire *wire = cone.mod->addWire(wname);
+			wire->port_id = port_id++;
+			wire->port_input = !port.is_output;
+			wire->port_output = port.is_output;
+			port.cone_wire = wire;
+			cone.canon_wire[port.parent_bit] = wire;
+		}
+		for (auto bit : internals) {
+			RTLIL::IdString wname = abc9_cone_wire_name(bit, "i");
+			if (cone.mod->wire(wname))
+				log_error("ABC9 isolate: duplicate internal wire %s.\n", wname);
+			cone.canon_wire[bit] = cone.mod->addWire(wname);
+		}
+		cone.mod->fixup_ports();
+
+		auto rewrite = [&](const RTLIL::SigSpec &sig) {
+			RTLIL::SigSpec out;
+			for (auto bit : sig) {
+				if (!bit.wire) {
+					out.append(bit);
+					continue;
+				}
+				RTLIL::SigBit canon = sigmap(bit);
+				if (!canon.wire) {
+					out.append(canon);
+					continue;
+				}
+				auto found = cone.canon_wire.find(canon);
+				if (found == cone.canon_wire.end())
+					log_error("ABC9 isolate: signal %s in %s has no cone wire.\n",
+							log_signal(canon), cone.mod);
+				out.append(RTLIL::SigBit(found->second, 0));
+			}
+			return out;
+		};
+
+		for (int idx : group.members) {
+			RTLIL::Cell *cell = cone_cells[idx];
+			RTLIL::Cell *created = cone.mod->addCell(cell->name, cell->type);
+			created->parameters = cell->parameters;
+			created->attributes = cell->attributes;
+			for (auto &conn : cell->connections())
+				created->setPort(conn.first, rewrite(conn.second));
+		}
+		for (int idx : group.members)
+			mod->remove(cone_cells[idx]);
+
+		if (cone.has_box) {
+			std::vector<RTLIL::Cell*> boxes;
+			for (auto cell : cone.mod->cells())
+				if (cell->attributes.count(ID::abc9_box_seq))
+					boxes.push_back(cell);
+			std::sort(boxes.begin(), boxes.end(), [](RTLIL::Cell *a, RTLIL::Cell *b) {
+				return a->attributes.at(ID::abc9_box_seq).as_int() <
+						b->attributes.at(ID::abc9_box_seq).as_int();
+			});
+			for (int i = 0; i < GetSize(boxes); i++)
+				boxes[i]->attributes[ID::abc9_box_seq] = i;
+		}
+
+		cones.push_back(std::move(cone));
+	}
+
+	std::string tempdir_name;
+	if (cleanup)
+		tempdir_name = get_base_tmpdir() + "/";
+	else
+		tempdir_name = "_tmp_";
+	tempdir_name += proc_program_prefix() + "yosys-abc-XXXXXX";
+	tempdir_name = make_temp_dir(tempdir_name);
+
+	active_design->selection().clear();
+	active_design->select(mod);
+	if (!lut_mode)
+		run_nocheck(stringf("abc9_ops -write_lut %s/input.lut", tempdir_name));
+	if (box_file.empty())
+		run_nocheck(stringf("abc9_ops -write_box %s/input.box", tempdir_name));
+
+	int nmap = 0;
+	for (auto &cone : cones) {
+		RTLIL::Module *holes = nullptr;
+		RTLIL::Design *holes_design = nullptr;
+		if (cone.has_box) {
+			auto stash = saved_designs.find("$abc9_holes");
+			if (stash == saved_designs.end() || !stash->second)
+				log_error("ABC9 isolate: module %s has abc9 boxes but no holes design.\n", mod);
+			holes_design = stash->second;
+			RTLIL::Module *parent_holes = holes_design->module(mod->name);
+			if (!parent_holes)
+				log_error("ABC9 isolate: module %s has abc9 boxes but no holes module.\n", mod);
+			holes = parent_holes->clone();
+			holes->name = cone.mod->name;
+			holes_design->add(holes);
+
+			pool<RTLIL::Wire*> keep;
+			for (auto cell : cone.mod->cells()) {
+				if (!cell->attributes.count(ID::abc9_box_seq))
+					continue;
+				RTLIL::Module *box_mod = active_design->module(cell->type);
+				if (!box_mod)
+					log_error("ABC9 isolate: missing box module %s for %s.\n", cell->type, cell);
+				for (auto port_name : box_mod->ports) {
+					RTLIL::Wire *port = box_mod->wire(port_name);
+					if (!port || !port->port_output)
+						continue;
+					std::string port_un = port_name.unescape();
+					RTLIL::IdString hname = stringf("$abc%s.%s", cell->name, port_un.c_str());
+					RTLIL::Wire *hw = holes->wire(hname);
+					if (!hw || !hw->port_output)
+						log_error("ABC9 isolate: holes wire %s for %s is missing.\n", hname, cell);
+					keep.insert(hw);
+				}
+			}
+			if (keep.empty())
+				log_error("ABC9 isolate: cone %s has boxes but no holes outputs.\n", cone.mod);
+
+			std::vector<RTLIL::Wire*> hole_wires;
+			for (auto wire : holes->wires())
+				if (wire->port_output)
+					hole_wires.push_back(wire);
+			for (auto wire : hole_wires) {
+				if (keep.count(wire))
+					continue;
+				wire->port_output = false;
+				wire->port_id = 0;
+			}
+			holes->fixup_ports();
+		}
+
+		active_design->selection().clear();
+		active_design->select(cone.mod);
+		run_nocheck(stringf("write_xaiger -map %s/input%d.sym %s/input%d.xaig",
+				tempdir_name, nmap, tempdir_name, nmap));
+		int num_outputs = active_design->scratchpad_get_int("write_xaiger.num_outputs");
+		if (holes) {
+			holes_design->remove(holes);
+			holes = nullptr;
+		}
+		if (num_outputs > 0)
+			cone.abc_index = nmap++;
+		else
+			log("Skipping ABC for cone %s: no outputs.\n", cone.mod);
+	}
+
+	log("Isolating %d combinational cones in %s (largest %d cells, %d ABC networks).\n",
+			GetSize(cones), mod, largest, nmap);
+
+	if (nmap) {
+		std::string abc9_exe_cmd = stringf("%s -cwd %s -cones %d", exe_cmd.str(), tempdir_name, nmap);
+		if (!lut_mode)
+			abc9_exe_cmd += stringf(" -lut %s/input.lut", tempdir_name);
+		if (box_file.empty())
+			abc9_exe_cmd += stringf(" -box %s/input.box", tempdir_name);
+		else
+			abc9_exe_cmd += stringf(" -box %s", box_file);
+		run_nocheck(abc9_exe_cmd);
+
+		for (auto &cone : cones) {
+			if (cone.abc_index < 0)
+				continue;
+			active_design->selection().clear();
+			active_design->select(cone.mod);
+			run_nocheck(stringf("read_aiger -xaiger -module_name %s$abc9 %s/output%d.aig",
+					cone.mod, tempdir_name, cone.abc_index));
+			active_design->selection().clear();
+			active_design->select(cone.mod);
+			run_nocheck(stringf("abc_ops_reintegrate -map %s/input%d.sym",
+					tempdir_name, cone.abc_index));
+		}
+	}
+
+	// Drop parent assigns that drive a bit the cone used to drive. The mapped
+	// signal is connected to every original driver bit below; leaving the old
+	// assign would double-drive it, and deleting an alias would undrive the
+	// other side.
+	pool<RTLIL::SigBit> driven;
+	for (auto &cone : cones)
+		for (auto &port : cone.ports)
+			if (port.is_output)
+				for (auto bit : port.originals)
+					if (bit.wire)
+						driven.insert(bit);
+	if (!driven.empty()) {
+		std::vector<RTLIL::SigSig> kept;
+		for (auto &conn : mod->connections()) {
+			RTLIL::SigSpec lhs, rhs;
+			for (int i = 0; i < GetSize(conn.first); i++) {
+				if (driven.count(conn.first[i]))
+					continue;
+				lhs.append(conn.first[i]);
+				rhs.append(conn.second[i]);
+			}
+			if (GetSize(lhs))
+				kept.push_back(RTLIL::SigSig(lhs, rhs));
+		}
+		mod->new_connections(kept);
+	}
+
+	for (auto &cone : cones) {
+		dict<RTLIL::Wire*, RTLIL::SigBit> input_of, output_of;
+		for (auto &port : cone.ports) {
+			if (port.is_output) {
+				RTLIL::Wire *sig = mod->addWire(NEW_ID);
+				output_of[port.cone_wire] = sig;
+			} else
+				input_of[port.cone_wire] = port.parent_bit;
+		}
+		dict<RTLIL::Wire*, RTLIL::Wire*> copied;
+		auto map_sig = [&](const RTLIL::SigSpec &sig) {
+			RTLIL::SigSpec out;
+			for (auto bit : sig) {
+				if (!bit.wire) {
+					out.append(bit);
+					continue;
+				}
+				auto in = input_of.find(bit.wire);
+				if (in != input_of.end()) {
+					out.append(in->second);
+					continue;
+				}
+				auto outb = output_of.find(bit.wire);
+				if (outb != output_of.end()) {
+					out.append(outb->second);
+					continue;
+				}
+				RTLIL::Wire *&parent_wire = copied[bit.wire];
+				if (!parent_wire) {
+					parent_wire = mod->addWire(NEW_ID, GetSize(bit.wire));
+					parent_wire->start_offset = bit.wire->start_offset;
+				}
+				out.append(RTLIL::SigBit(parent_wire, bit.offset));
+			}
+			return out;
+		};
+		for (auto cell : cone.mod->cells().to_vector()) {
+			RTLIL::Cell *created = mod->addCell(cell->name, cell->type);
+			created->parameters = cell->parameters;
+			created->attributes = cell->attributes;
+			for (auto &conn : cell->connections())
+				created->setPort(conn.first, map_sig(conn.second));
+		}
+		for (auto &conn : cone.mod->connections())
+			mod->connect(map_sig(conn.first), map_sig(conn.second));
+		for (auto &port : cone.ports) {
+			if (!port.is_output)
+				continue;
+			RTLIL::SigBit sig = output_of.at(port.cone_wire);
+			pool<RTLIL::SigBit> seen;
+			for (auto bit : port.originals) {
+				if (!bit.wire || !seen.insert(bit).second)
+					continue;
+				mod->connect(bit, sig);
+			}
+		}
+	}
+
+	for (auto &cone : cones) {
+		RTLIL::IdString mapped_name = stringf("%s$abc9", cone.mod->name);
+		if (RTLIL::Module *mapped = active_design->module(mapped_name))
+			active_design->remove(mapped);
+		active_design->remove(cone.mod);
+		cone.mod = nullptr;
+	}
+
+	if (cleanup) {
+		log("Removing temp directory.\n");
+		remove_directory(tempdir_name);
+	}
+	active_design->selection().clear();
+	return true;
+}
 
 PRIVATE_NAMESPACE_END

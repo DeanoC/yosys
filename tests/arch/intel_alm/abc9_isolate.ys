@@ -1,0 +1,4 @@
+read_verilog abc9_isolate.v
+hierarchy -top top
+proc
+equiv_opt -async2sync -assert -map +/intel_alm/common/alm_sim.v -map +/intel_alm/common/dff_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf -nobram -nolutram -nodsp
