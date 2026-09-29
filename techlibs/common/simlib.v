@@ -2700,7 +2700,7 @@ parameter STATE_BITS = 1;
 parameter STATE_NUM = 1;
 parameter STATE_NUM_LOG2 = 1;
 parameter STATE_RST = 0;
-parameter STATE_INIT = -1;
+parameter integer STATE_INIT = -1;
 parameter STATE_TABLE = 1'b0;
 
 parameter TRANS_NUM = 1;
