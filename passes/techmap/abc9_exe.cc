@@ -172,7 +172,8 @@ void abc9_module(RTLIL::Design *design, std::string script_file, std::string exe
 		vector<int> lut_costs, bool dff_mode, std::string delay_target,
 		bool show_tempdir, std::string box_file, std::string lut_file,
 		std::vector<std::string> liberty_files, std::string wire_delay, std::string tempdir_name,
-		std::string constr_file, std::vector<std::string> dont_use_cells, std::vector<std::string> genlib_files)
+		std::string constr_file, std::vector<std::string> dont_use_cells, std::vector<std::string> genlib_files,
+		int cone_count)
 {
 	std::string abc9_script;
 
@@ -211,74 +212,146 @@ void abc9_module(RTLIL::Design *design, std::string script_file, std::string exe
 
 	log_assert(!box_file.empty());
 	abc9_script += stringf("read_box \"%s\"; ", box_file);
-	abc9_script += stringf("&read %s/input.xaig; &ps; ", tempdir_name);
 
-	if (!script_file.empty()) {
-		if (script_file[0] == '+') {
-			for (size_t i = 1; i < script_file.size(); i++)
-				if (script_file[i] == '\'')
-					abc9_script += "'\\''";
-				else if (script_file[i] == ',')
-					abc9_script += " ";
-				else
-					abc9_script += script_file[i];
+	// Substitutions are limited to the text just appended so a second cone
+	// does not rewrite the first cone's &mfs snapshot.
+	auto append_cone = [&](const std::string &in_name, const std::string &out_name) {
+		size_t start = abc9_script.size();
+		abc9_script += stringf("&read %s/%s; &ps; ", tempdir_name, in_name);
+
+		if (!script_file.empty()) {
+			if (script_file[0] == '+') {
+				for (size_t i = 1; i < script_file.size(); i++)
+					if (script_file[i] == '\'')
+						abc9_script += "'\\''";
+					else if (script_file[i] == ',')
+						abc9_script += " ";
+					else
+						abc9_script += script_file[i];
+			} else
+				abc9_script += stringf("source %s", script_file);
+		} else if (!lut_costs.empty() || !lut_file.empty()) {
+			abc9_script += RTLIL::constpad.at("abc9.script.default").substr(1,std::string::npos);
+		} else if (!liberty_files.empty() || !genlib_files.empty()) {
+			abc9_script += RTLIL::constpad.at("abc9.script.default").substr(1,std::string::npos);
 		} else
-			abc9_script += stringf("source %s", script_file);
-	} else if (!lut_costs.empty() || !lut_file.empty()) {
-		abc9_script += RTLIL::constpad.at("abc9.script.default").substr(1,std::string::npos);
-	} else if (!liberty_files.empty() || !genlib_files.empty()) {
-		abc9_script += RTLIL::constpad.at("abc9.script.default").substr(1,std::string::npos);
-	} else
-		log_abort();
+			log_abort();
 
-	for (size_t pos = abc9_script.find("{D}"); pos != std::string::npos; pos = abc9_script.find("{D}", pos))
-		abc9_script = abc9_script.substr(0, pos) + delay_target + abc9_script.substr(pos+3);
+		for (size_t pos = abc9_script.find("{D}", start); pos != std::string::npos; pos = abc9_script.find("{D}", pos))
+			abc9_script = abc9_script.substr(0, pos) + delay_target + abc9_script.substr(pos+3);
 
-	for (size_t pos = abc9_script.find("{W}"); pos != std::string::npos; pos = abc9_script.find("{W}", pos))
-		abc9_script = abc9_script.substr(0, pos) + wire_delay + abc9_script.substr(pos+3);
+		for (size_t pos = abc9_script.find("{W}", start); pos != std::string::npos; pos = abc9_script.find("{W}", pos))
+			abc9_script = abc9_script.substr(0, pos) + wire_delay + abc9_script.substr(pos+3);
 
-	std::string R;
-	if (design->scratchpad.count("abc9.if.R"))
-		R = "-R " + design->scratchpad_get_string("abc9.if.R");
-	for (size_t pos = abc9_script.find("{R}"); pos != std::string::npos; pos = abc9_script.find("{R}", pos))
-		abc9_script = abc9_script.substr(0, pos) + R + abc9_script.substr(pos+3);
+		std::string R;
+		if (design->scratchpad.count("abc9.if.R"))
+			R = "-R " + design->scratchpad_get_string("abc9.if.R");
+		for (size_t pos = abc9_script.find("{R}", start); pos != std::string::npos; pos = abc9_script.find("{R}", pos))
+			abc9_script = abc9_script.substr(0, pos) + R + abc9_script.substr(pos+3);
 
-	if (design->scratchpad_get_bool("abc9.nomfs"))
-		for (size_t pos = abc9_script.find("&mfs"); pos != std::string::npos; pos = abc9_script.find("&mfs", pos))
-			abc9_script = abc9_script.erase(pos, strlen("&mfs"));
-	else {
-		auto s = stringf("&write -n %s/output.aig; ", tempdir_name);
-		for (size_t pos = abc9_script.find("&mfs"); pos != std::string::npos; pos = abc9_script.find("&mfs", pos)) {
-			abc9_script = abc9_script.insert(pos, s);
-			pos += GetSize(s) + strlen("&mfs");
+		if (design->scratchpad_get_bool("abc9.nomfs"))
+			for (size_t pos = abc9_script.find("&mfs", start); pos != std::string::npos; pos = abc9_script.find("&mfs", pos))
+				abc9_script = abc9_script.erase(pos, strlen("&mfs"));
+		else {
+			auto s = stringf("&write -n %s/%s; ", tempdir_name, out_name);
+			for (size_t pos = abc9_script.find("&mfs", start); pos != std::string::npos; pos = abc9_script.find("&mfs", pos)) {
+				abc9_script = abc9_script.insert(pos, s);
+				pos += GetSize(s) + strlen("&mfs");
+			}
 		}
-	}
 
-	abc9_script += stringf("; &ps -l; &write -n %s/output.aig", tempdir_name);
-	if (design->scratchpad_get_bool("abc9.verify", true)) {
-		if (dff_mode)
-			abc9_script += "; &verify -s";
-		else
-			abc9_script += "; &verify";
-	}
-	abc9_script += "; time";
-	abc9_script = add_echos_to_abc9_cmd(abc9_script);
+		abc9_script += stringf("; &ps -l; &write -n %s/%s", tempdir_name, out_name);
+		if (design->scratchpad_get_bool("abc9.verify", true)) {
+			if (dff_mode)
+				abc9_script += "; &verify -s";
+			else
+				abc9_script += "; &verify";
+		}
+	};
 
-	for (size_t i = 0; i+1 < abc9_script.size(); i++)
-		if (abc9_script[i] == ';' && abc9_script[i+1] == ' ')
-			abc9_script[i+1] = '\n';
+	// Library reads stay outside each cone so a fresh process still sees them.
+	// One process per cone: &dch / &if keep solver and hash state that a later
+	// &read does not clear, and that state was retargeting unrelated cones.
+	std::string libs = abc9_script;
 
-	FILE *f = fopen(stringf("%s/abc.script", tempdir_name.c_str()).c_str(), "wt");
-	fprintf(f, "%s\n", abc9_script.c_str());
-	fclose(f);
+	auto finalize_script = [&](std::string script) {
+		script += "; time";
+		script = add_echos_to_abc9_cmd(script);
+		for (size_t i = 0; i + 1 < script.size(); i++)
+			if (script[i] == ';' && script[i + 1] == ' ')
+				script[i + 1] = '\n';
+		return script;
+	};
 
-	std::string buffer;
+	auto invoke_abc = [&](const std::string &script, const std::string &script_path, const std::string &probe) {
+		FILE *f = fopen(script_path.c_str(), "wt");
+		if (f == nullptr)
+			log_error("Opening %s for writing failed: %s\n", script_path, strerror(errno));
+		fprintf(f, "%s\n", script.c_str());
+		fclose(f);
+
+		std::string buffer = stringf("\"%s\" -s -f %s 2>&1", exe_file, script_path);
+		log("Running ABC command: %s\n", replace_tempdir(buffer, tempdir_name, show_tempdir));
+
+#ifndef YOSYS_LINK_ABC
+		abc9_output_filter filt(tempdir_name, show_tempdir);
+		int ret = run_command(buffer, std::bind(&abc9_output_filter::next_line, filt, std::placeholders::_1));
+#else
+		string temp_stdouterr_name = stringf("%s/stdouterr.txt", tempdir_name);
+		FILE *temp_stdouterr_w = fopen(temp_stdouterr_name.c_str(), "w");
+		if (temp_stdouterr_w == NULL)
+			log_error("ABC: cannot open a temporary file for output redirection");
+		fflush(stdout);
+		fflush(stderr);
+		FILE *old_stdout = fopen(temp_stdouterr_name.c_str(), "r"); // need any fd for renumbering
+		FILE *old_stderr = fopen(temp_stdouterr_name.c_str(), "r"); // need any fd for renumbering
+#if defined(__wasm)
+#define fd_renumber(from, to) (void)__wasilibc_fd_renumber(from, to)
+#else
+#define fd_renumber(from, to) dup2(from, to)
+#endif
+		fd_renumber(fileno(stdout), fileno(old_stdout));
+		fd_renumber(fileno(stderr), fileno(old_stderr));
+		fd_renumber(fileno(temp_stdouterr_w), fileno(stdout));
+		fd_renumber(fileno(temp_stdouterr_w), fileno(stderr));
+		fclose(temp_stdouterr_w);
+		// These needs to be mutable, supposedly due to getopt
+		char *abc9_argv[5];
+		abc9_argv[0] = strdup(exe_file.c_str());
+		abc9_argv[1] = strdup("-s");
+		abc9_argv[2] = strdup("-f");
+		abc9_argv[3] = strdup(script_path.c_str());
+		abc9_argv[4] = 0;
+		int ret = abc::Abc_RealMain(4, abc9_argv);
+		free(abc9_argv[0]);
+		free(abc9_argv[1]);
+		free(abc9_argv[2]);
+		free(abc9_argv[3]);
+		fflush(stdout);
+		fflush(stderr);
+		fd_renumber(fileno(old_stdout), fileno(stdout));
+		fd_renumber(fileno(old_stderr), fileno(stderr));
+		fclose(old_stdout);
+		fclose(old_stderr);
+		std::ifstream temp_stdouterr_r(temp_stdouterr_name);
+		abc9_output_filter filt(tempdir_name, show_tempdir);
+		for (std::string line; std::getline(temp_stdouterr_r, line); )
+			filt.next_line(line + "\n");
+		temp_stdouterr_r.close();
+#endif
+		if (ret != 0) {
+			if (check_file_exists(probe))
+				log_warning("ABC: execution of command \"%s\" failed: return code %d.\n", buffer, ret);
+			else
+				log_error("ABC: execution of command \"%s\" failed: return code %d.\n", buffer, ret);
+		}
+	};
 
 	log_header(design, "Executing ABC9.\n");
 
 	if (!lut_costs.empty()) {
-		buffer = stringf("%s/lutdefs.txt", tempdir_name);
-		f = fopen(buffer.c_str(), "wt");
+		std::string buffer = stringf("%s/lutdefs.txt", tempdir_name);
+		FILE *f = fopen(buffer.c_str(), "wt");
 		if (f == NULL)
 			log_error("Opening %s for writing failed: %s\n", buffer, strerror(errno));
 		for (int i = 0; i < GetSize(lut_costs); i++)
@@ -286,61 +359,19 @@ void abc9_module(RTLIL::Design *design, std::string script_file, std::string exe
 		fclose(f);
 	}
 
-	buffer = stringf("\"%s\" -s -f %s/abc.script 2>&1", exe_file, tempdir_name);
-	log("Running ABC command: %s\n", replace_tempdir(buffer, tempdir_name, show_tempdir));
-
-#ifndef YOSYS_LINK_ABC
-	abc9_output_filter filt(tempdir_name, show_tempdir);
-	int ret = run_command(buffer, std::bind(&abc9_output_filter::next_line, filt, std::placeholders::_1));
-#else
-	string temp_stdouterr_name = stringf("%s/stdouterr.txt", tempdir_name);
-	FILE *temp_stdouterr_w = fopen(temp_stdouterr_name.c_str(), "w");
-	if (temp_stdouterr_w == NULL)
-		log_error("ABC: cannot open a temporary file for output redirection");
-	fflush(stdout);
-	fflush(stderr);
-	FILE *old_stdout = fopen(temp_stdouterr_name.c_str(), "r"); // need any fd for renumbering
-	FILE *old_stderr = fopen(temp_stdouterr_name.c_str(), "r"); // need any fd for renumbering
-#if defined(__wasm)
-#define fd_renumber(from, to) (void)__wasilibc_fd_renumber(from, to)
-#else
-#define fd_renumber(from, to) dup2(from, to)
-#endif
-	fd_renumber(fileno(stdout), fileno(old_stdout));
-	fd_renumber(fileno(stderr), fileno(old_stderr));
-	fd_renumber(fileno(temp_stdouterr_w), fileno(stdout));
-	fd_renumber(fileno(temp_stdouterr_w), fileno(stderr));
-	fclose(temp_stdouterr_w);
-	// These needs to be mutable, supposedly due to getopt
-	char *abc9_argv[5];
-	string tmp_script_name = stringf("%s/abc.script", tempdir_name);
-	abc9_argv[0] = strdup(exe_file.c_str());
-	abc9_argv[1] = strdup("-s");
-	abc9_argv[2] = strdup("-f");
-	abc9_argv[3] = strdup(tmp_script_name.c_str());
-	abc9_argv[4] = 0;
-	int ret = abc::Abc_RealMain(4, abc9_argv);
-	free(abc9_argv[0]);
-	free(abc9_argv[1]);
-	free(abc9_argv[2]);
-	free(abc9_argv[3]);
-	fflush(stdout);
-	fflush(stderr);
-	fd_renumber(fileno(old_stdout), fileno(stdout));
-	fd_renumber(fileno(old_stderr), fileno(stderr));
-	fclose(old_stdout);
-	fclose(old_stderr);
-	std::ifstream temp_stdouterr_r(temp_stdouterr_name);
-	abc9_output_filter filt(tempdir_name, show_tempdir);
-	for (std::string line; std::getline(temp_stdouterr_r, line); )
-		filt.next_line(line + "\n");
-	temp_stdouterr_r.close();
-#endif
-	if (ret != 0) {
-		if (check_file_exists(stringf("%s/output.aig", tempdir_name)))
-			log_warning("ABC: execution of command \"%s\" failed: return code %d.\n", buffer, ret);
-		else
-			log_error("ABC: execution of command \"%s\" failed: return code %d.\n", buffer, ret);
+	if (cone_count > 0) {
+		for (int i = 0; i < cone_count; i++) {
+			abc9_script = libs;
+			append_cone(stringf("input%d.xaig", i), stringf("output%d.aig", i));
+			invoke_abc(finalize_script(abc9_script),
+					stringf("%s/abc-%d.script", tempdir_name.c_str(), i),
+					stringf("%s/output%d.aig", tempdir_name.c_str(), i));
+		}
+	} else {
+		append_cone("input.xaig", "output.aig");
+		invoke_abc(finalize_script(abc9_script),
+				stringf("%s/abc.script", tempdir_name.c_str()),
+				stringf("%s/output.aig", tempdir_name.c_str()));
 	}
 }
 
@@ -438,6 +469,12 @@ struct Abc9ExePass : public Pass {
 		log("        file is expected. temporary files will be created in this directory, and\n");
 		log("        the mapped result will be written to 'output.aig'.\n");
 		log("\n");
+		log("    -cones <N>\n");
+		log("        map N independent networks in this directory (input0.xaig .. input<N-1>.xaig\n");
+		log("        to output0.aig .. output<N-1>.aig). Each network is a separate ABC process,\n");
+		log("        so mapper state cannot cross between them. Without this option a single\n");
+		log("        input.xaig / output.aig pair is used.\n");
+		log("\n");
 		log("Note that this is a logic optimization pass within Yosys that is calling ABC\n");
 		log("internally. This is not going to \"run ABC on your design\". It will instead run\n");
 		log("ABC on logic snippets extracted from your design. You will not get any useful\n");
@@ -459,6 +496,7 @@ struct Abc9ExePass : public Pass {
 		std::string tempdir_name;
 		bool dff_mode = false;
 		bool show_tempdir = false;
+		int cone_count = 0;
 		vector<int> lut_costs;
 
 #if 0
@@ -531,6 +569,10 @@ struct Abc9ExePass : public Pass {
 			}
 			if (arg == "-cwd" && argidx+1 < args.size()) {
 				tempdir_name = args[++argidx];
+				continue;
+			}
+			if (arg == "-cones" && argidx+1 < args.size()) {
+				cone_count = atoi(args[++argidx].c_str());
 				continue;
 			}
 			if (arg == "-liberty" && argidx+1 < args.size()) {
@@ -617,7 +659,7 @@ struct Abc9ExePass : public Pass {
 		abc9_module(design, script_file, exe_file, lut_costs, dff_mode,
 				delay_target, show_tempdir,
 				box_file, lut_file, liberty_files, wire_delay, tempdir_name,
-				constr_file, dont_use_cells, genlib_files);
+				constr_file, dont_use_cells, genlib_files, cone_count);
 	}
 } Abc9ExePass;
 
