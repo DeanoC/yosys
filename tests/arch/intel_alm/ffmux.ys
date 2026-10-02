@@ -1,0 +1,743 @@
+# Run from tests/arch/intel_alm, like dffs.ys/adffs.ys/fsm_init.ys.
+# The gold side is original RTL; the gate side uses the existing primitive
+# models, including the real SCLR-first priority and initial Q=0. SAT proves
+# the initialized base case as well as induction. Inputs stay arbitrary and
+# defined, so these are binary sequential equivalence checks, not X/Z claims.
+read_verilog -icells ffmux.v
+design -save read
+
+# Default-off synthesis still leaves this mux in a LUT and SLOAD constant.
+hierarchy -top ffmux_zero
+proc
+equiv_opt -run :prove -map +/intel_alm/common/alm_sim.v -map +/intel_alm/common/dff_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf
+async2sync
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+design -load postopt
+cd ffmux_zero
+select -assert-count 1 t:MISTRAL_FF
+select -assert-count 1 t:MISTRAL_ALUT3
+select -assert-none t:MISTRAL_FF %ci:+[SLOAD] w:* %i
+
+# Opt-in must survive the entire ABC9 mapping, with no data mux LUT left.
+design -load read
+hierarchy -top ffmux_zero
+proc
+equiv_opt -run :prove -map +/intel_alm/common/alm_sim.v -map +/intel_alm/common/dff_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf -ffmux
+async2sync
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+design -load postopt
+cd ffmux_zero
+select -assert-count 1 t:MISTRAL_FF
+select -assert-none t:MISTRAL_ALUT*
+select -assert-count 1 t:MISTRAL_FF %ci:+[SLOAD] w:s %i
+
+# The exposed sequential ABC9 option must also preserve real absorption.
+# Check the initialized state and arbitrary enable holds against original RTL,
+# then require the nonconstant native load to remain after ABC9 -dff.
+design -load read
+hierarchy -top ffmux_zero
+proc
+equiv_opt -run :prove -map +/intel_alm/common/alm_sim.v -map +/intel_alm/common/dff_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf -ffmux -dff
+async2sync
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+design -load postopt
+cd ffmux_zero
+select -assert-count 1 t:MISTRAL_FF
+select -assert-none t:MISTRAL_ALUT*
+select -assert-count 1 w:s %co:+[SLOAD] t:MISTRAL_FF %i
+
+# This invocation follows an enabled one in the same process. It also checks
+# that the script pass resets the flag rather than inheriting an earlier opt-in.
+design -load read
+hierarchy -top ffmux_zero
+synth_intel_alm -family cyclonev -noiopad -noclkbuf
+cd ffmux_zero
+select -assert-count 1 t:MISTRAL_ALUT3
+select -assert-none t:MISTRAL_FF %ci:+[SLOAD] w:* %i
+
+# Logical init=1 is handled by dfflegalize, never by a fake native INIT=1.
+# Its inversion can separate the mux from the FF; admission may then skip it.
+design -load read
+hierarchy -top ffmux_one
+proc
+equiv_opt -run :prove -map +/intel_alm/common/alm_sim.v -map +/intel_alm/common/dff_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf -ffmux
+async2sync
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+design -load postopt
+cd ffmux_one
+select -assert-count 1 t:MISTRAL_FF
+
+design -load read
+hierarchy -top ffmux_inverted_select
+proc
+equiv_opt -run :prove -map +/intel_alm/common/alm_sim.v -map +/intel_alm/common/dff_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf -ffmux
+async2sync
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+design -load postopt
+cd ffmux_inverted_select
+select -assert-count 1 t:MISTRAL_FF
+select -assert-any t:MISTRAL_FF %ci:+[SLOAD] w:* %i
+
+# clk2fflogic includes actual input-clock transitions in the falling-edge
+# proof. Both enable holds and initialization are still checked from step 1.
+design -load read
+hierarchy -top ffmux_falling
+proc
+equiv_opt -run :prove -map +/intel_alm/common/alm_sim.v -map +/intel_alm/common/dff_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf -ffmux
+clk2fflogic
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+design -load postopt
+cd ffmux_falling
+select -assert-count 1 t:MISTRAL_FF
+select -assert-count 1 t:MISTRAL_FF %ci:+[SLOAD] w:s %i
+
+# Two independently enabled FFs absorb the same mux while its combinational
+# output remains live. Equivalence observes all three outputs.
+design -load read
+hierarchy -top ffmux_shared
+proc
+equiv_opt -run :prove -map +/intel_alm/common/alm_sim.v -map +/intel_alm/common/dff_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf -ffmux
+async2sync
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+design -load postopt
+cd ffmux_shared
+select -assert-count 2 t:MISTRAL_FF
+select -assert-count 1 t:MISTRAL_ALUT3
+select -assert-count 2 w:s %co:+[SLOAD] t:MISTRAL_FF %i
+
+# SCLR and ACLR are outside this first admission scope. Their behavior still
+# agrees with original RTL for arbitrary resets/enables, and SLOAD stays zero.
+design -load read
+hierarchy -top ffmux_sync_clear
+proc
+equiv_opt -run :prove -map +/intel_alm/common/alm_sim.v -map +/intel_alm/common/dff_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf -ffmux
+async2sync
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+design -load postopt
+cd ffmux_sync_clear
+select -assert-count 1 t:MISTRAL_FF
+select -assert-none t:MISTRAL_FF %ci:+[SLOAD] w:* %i
+
+design -load read
+hierarchy -top ffmux_async_clear
+proc
+equiv_opt -run :prove -map +/intel_alm/common/alm_sim.v -map +/intel_alm/common/dff_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf -ffmux
+async2sync
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+design -load postopt
+cd ffmux_async_clear
+select -assert-count 1 t:MISTRAL_FF
+select -assert-none t:MISTRAL_FF %ci:+[SLOAD] w:* %i
+
+# Native shape/alias proof and exact rewrite. The pass must leave even an
+# unused original mux alive; cleanup belongs to the caller.
+design -load read
+read_verilog -lib +/intel_alm/common/dff_sim.v
+hierarchy -top ffmux_native
+design -save native
+equiv_opt -run :prove -map +/intel_alm/common/dff_sim.v intel_alm_ffmux
+async2sync
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+design -load postopt
+cd ffmux_native
+select -assert-count 1 t:MISTRAL_FF
+select -assert-count 1 t:$_MUX_
+connect -assert -port ff DATAIN a
+connect -assert -port ff SDATA b
+connect -assert -port ff SLOAD s
+connect -assert -port ff CLK clk
+connect -assert -port ff ENA en
+connect -assert -port ff ACLR 1'1
+connect -assert -port ff SCLR 1'0
+connect -assert -port ff Q q_alias
+connect -assert -port mux A a
+connect -assert -port mux B b
+connect -assert -port mux S s
+connect -assert -port mux Y mux_alias
+select -assert-count 1 c:ff a:fixture_ff=19 %i
+select -assert-count 1 c:mux a:fixture_mux=11 %i
+select -assert-count 1 w:mux_alias a:fixture_alias=27 %i
+select -assert-count 1 w:q_alias a:fixture_state=31 %i
+select -assert-count 1 w:q_alias a:init=1'b0 %i
+
+# A second pass leaves all original cells, attributes, ports and init intact.
+intel_alm_ffmux
+select -assert-count 2 c:*
+connect -assert -port ff DATAIN a
+connect -assert -port ff SDATA b
+connect -assert -port ff SLOAD s
+connect -assert -port ff CLK clk
+connect -assert -port ff ENA en
+connect -assert -port ff ACLR 1'1
+connect -assert -port ff SCLR 1'0
+connect -assert -port ff Q q_alias
+connect -assert -port mux A a
+connect -assert -port mux B b
+connect -assert -port mux S s
+connect -assert -port mux Y mux_alias
+select -assert-count 1 c:ff a:fixture_ff=19 %i
+select -assert-count 1 c:mux a:fixture_mux=11 %i
+select -assert-count 1 w:q_alias a:init=1'b0 %i
+opt_clean
+select -assert-none t:$_MUX_
+select -assert-count 1 t:MISTRAL_FF
+intel_alm_ffmux
+connect -assert -port ff DATAIN a
+connect -assert -port ff SDATA b
+connect -assert -port ff SLOAD s
+
+# Neither an unselected FF nor an unselected mux may be modified.
+design -load native
+cd ffmux_native
+intel_alm_ffmux c:ff
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+intel_alm_ffmux c:mux
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+intel_alm_ffmux c:ff c:mux
+connect -assert -port ff DATAIN a
+connect -assert -port ff SDATA b
+connect -assert -port ff SLOAD s
+
+# Binary constants on both data arms are supported, with the same real
+# initialized primitive and arbitrary select/enable equivalence oracle.
+design -load native
+cd ffmux_native
+connect -port mux A 1'b0
+connect -port mux B 1'b1
+cd ..
+equiv_opt -run :prove -map +/intel_alm/common/dff_sim.v intel_alm_ffmux
+async2sync
+miter -equiv -make_assert -flatten gold gate miter
+sat -verify -seq 12 -prove-asserts -set-def-inputs -enable_undef miter
+sat -verify -seq 4 -tempinduct -prove-asserts -set-def-inputs -enable_undef miter
+design -load postopt
+cd ffmux_native
+connect -assert -port ff DATAIN 1'b0
+connect -assert -port ff SDATA 1'b1
+connect -assert -port ff SLOAD s
+connect -assert -port ff ENA en
+connect -assert -port ff Q q_alias
+
+# Paired negative/positive cases isolate each protection spelling/location.
+design -load native
+cd ffmux_native
+setattr -set keep 1 c:ff
+intel_alm_ffmux
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+select -assert-count 1 c:ff a:keep=1 %i
+setattr -unset keep c:ff
+intel_alm_ffmux
+connect -assert -port ff SLOAD s
+
+design -load native
+cd ffmux_native
+setattr -set dont_touch 1 c:mux
+intel_alm_ffmux
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+select -assert-count 1 c:mux a:dont_touch=1 %i
+setattr -unset dont_touch c:mux
+intel_alm_ffmux
+connect -assert -port ff SLOAD s
+
+design -load native
+cd ffmux_native
+setattr -set donttouch 1 w:mux_alias
+intel_alm_ffmux
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+select -assert-count 1 w:mux_alias a:donttouch=1 %i
+setattr -unset donttouch w:mux_alias
+intel_alm_ffmux
+connect -assert -port ff SLOAD s
+
+design -load native
+setattr -mod -set keep 1 ffmux_native
+cd ffmux_native
+intel_alm_ffmux
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+cd ..
+setattr -mod -unset keep ffmux_native
+cd ffmux_native
+intel_alm_ffmux
+connect -assert -port ff SLOAD s
+
+# The actual native whitebox signature is required. Removing only its box
+# marker prevents absorption; restoring that marker alone enables it again.
+design -load native
+setattr -mod -unset abc9_box =MISTRAL_FF
+cd ffmux_native
+intel_alm_ffmux
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+cd ..
+setattr -mod -set abc9_box 1 =MISTRAL_FF
+cd ffmux_native
+intel_alm_ffmux
+connect -assert -port ff DATAIN a
+connect -assert -port ff SDATA b
+connect -assert -port ff SLOAD s
+
+# A protected Q alias is also a protected connected net, even though the FF
+# port names the other alias. Removing the attribute alone enables absorption.
+design -load native
+cd ffmux_native
+setattr -set keep 1 w:q
+intel_alm_ffmux
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+setattr -unset keep w:q
+intel_alm_ffmux
+connect -assert -port ff SLOAD s
+
+# Shared native mux, partial selection and independent enables. Cleanup must
+# preserve the mux for both the unselected consumer and combinational output.
+design -load read
+read_verilog -lib +/intel_alm/common/dff_sim.v
+hierarchy -top ffmux_native_shared
+cd ffmux_native_shared
+intel_alm_ffmux c:ff0 c:mux
+connect -assert -port ff0 DATAIN a
+connect -assert -port ff0 SDATA b
+connect -assert -port ff0 SLOAD s
+connect -assert -port ff0 ENA en0
+connect -assert -port ff1 DATAIN mux_alias
+connect -assert -port ff1 ENA en1
+connect -assert -port ff1 SLOAD 1'0
+opt_clean
+select -assert-count 1 t:$_MUX_
+connect -assert -port mux Y comb
+intel_alm_ffmux
+connect -assert -port ff1 DATAIN a
+connect -assert -port ff1 SDATA b
+connect -assert -port ff1 SLOAD s
+connect -assert -port ff0 Q q0
+connect -assert -port ff1 Q q1
+opt_clean
+select -assert-count 1 t:$_MUX_
+select -assert-count 2 t:MISTRAL_FF
+connect -assert -port mux Y comb
+connect -assert -port mux A a
+connect -assert -port mux B b
+connect -assert -port mux S s
+
+# Dynamic and already-consumed reset/load inputs are expected skips, with
+# original data/control connections and all six mux/FF pairs still present.
+design -load read
+read_verilog -lib +/intel_alm/common/dff_sim.v
+hierarchy -top ffmux_native_controls
+cd ffmux_native_controls
+intel_alm_ffmux
+select -assert-count 6 t:MISTRAL_FF
+select -assert-count 6 t:$_MUX_
+connect -assert -port async_ff DATAIN selected[0]
+connect -assert -port async_ff ACLR reset_n
+connect -assert -port async_ff SLOAD 1'0
+connect -assert -port sync_ff DATAIN selected[1]
+connect -assert -port sync_ff SCLR reset
+connect -assert -port sync_ff SLOAD 1'0
+connect -assert -port load_ff DATAIN selected[2]
+connect -assert -port load_ff SLOAD load
+connect -assert -port load_ff SDATA data
+connect -assert -port data_ff DATAIN selected[3]
+connect -assert -port data_ff SLOAD 1'0
+connect -assert -port data_ff SDATA data
+connect -assert -port always_load_ff DATAIN selected[4]
+connect -assert -port always_load_ff SLOAD 1'1
+connect -assert -port clear_ff DATAIN selected[5]
+connect -assert -port clear_ff ACLR 1'0
+connect -assert -port clear_ff SLOAD 1'0
+
+# Exact shape/parameter guards; do not run check/equivalence on malformed
+# cells. Each case starts from the same qualifying native fixture.
+design -load native
+cd ffmux_native
+setparam -set EXTRA 1 c:ff
+intel_alm_ffmux
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+select -assert-count 1 c:ff r:EXTRA=1 %i
+select -assert-count 2 c:*
+
+design -load native
+cd ffmux_native
+# Internal cells are checked after every logical script line. Exercise the
+# malformed frame and its unchanged assertions, then restore legal shape
+# within that line; the following line requires actual absorption.
+setparam -set EXTRA 1 c:mux; intel_alm_ffmux; \
+    connect -assert -port ff DATAIN mux_alias; \
+    connect -assert -port ff SLOAD 1'0; \
+    select -assert-count 1 c:mux r:EXTRA=1 %i; \
+    select -assert-count 2 c:*; setparam -unset EXTRA c:mux
+intel_alm_ffmux; select -assert-count 2 c:*; \
+    connect -assert -port ff DATAIN a; \
+    connect -assert -port ff SDATA b; \
+    connect -assert -port ff SLOAD s; \
+    connect -assert -port ff CLK clk; \
+    connect -assert -port ff ENA en; \
+    connect -assert -port ff ACLR 1'b1; \
+    connect -assert -port ff SCLR 1'b0; \
+    connect -assert -port ff Q q_alias; \
+    connect -assert -port mux A a; \
+    connect -assert -port mux B b; \
+    connect -assert -port mux S s; \
+    connect -assert -port mux Y mux_alias
+
+design -load native
+cd ffmux_native
+connect -port ff EXTRA a
+intel_alm_ffmux
+connect -assert -port ff EXTRA a
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+select -assert-count 2 c:*
+
+design -load native
+cd ffmux_native
+# connect cannot remove a named cell port: -unset rewires signal drivers.
+# Reload the saved native graph after all negative assertions to restore
+# legal shape before the line-end checker. This pair makes no same-object
+# restoration claim; its next line requires real absorption of that graph.
+connect -port mux EXTRA b; intel_alm_ffmux; \
+    connect -assert -port mux EXTRA b; \
+    connect -assert -port ff DATAIN mux_alias; \
+    connect -assert -port ff SLOAD 1'0; \
+    select -assert-count 2 c:*; design -load native; cd ffmux_native
+intel_alm_ffmux; select -assert-count 2 c:*; \
+    connect -assert -port ff DATAIN a; \
+    connect -assert -port ff SDATA b; \
+    connect -assert -port ff SLOAD s; \
+    connect -assert -port ff CLK clk; \
+    connect -assert -port ff ENA en; \
+    connect -assert -port ff ACLR 1'b1; \
+    connect -assert -port ff SCLR 1'b0; \
+    connect -assert -port ff Q q_alias; \
+    connect -assert -port mux A a; \
+    connect -assert -port mux B b; \
+    connect -assert -port mux S s; \
+    connect -assert -port mux Y mux_alias
+
+design -load native
+cd ffmux_native
+chtype -set FFMUX_UNSUPPORTED c:ff
+intel_alm_ffmux
+select -assert-count 1 t:FFMUX_UNSUPPORTED
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+select -assert-count 2 c:*
+
+# Construct invalid widths only after reading a valid scalar native fixture.
+# Do not run check/equivalence on these malformed cells. Restoring only the
+# scalar width must enable real absorption in each independent paired case.
+design -load native
+cd ffmux_native
+connect -port ff SLOAD 2'b00
+intel_alm_ffmux
+select -assert-count 2 c:*
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 2'b00
+connect -assert -port ff SDATA 1'b0
+connect -assert -port ff CLK clk
+connect -assert -port ff ENA en
+connect -assert -port ff ACLR 1'b1
+connect -assert -port ff SCLR 1'b0
+connect -assert -port ff Q q_alias
+connect -assert -port mux A a
+connect -assert -port mux B b
+connect -assert -port mux S s
+connect -assert -port mux Y mux_alias
+connect -port ff SLOAD 1'b0
+intel_alm_ffmux
+select -assert-count 2 c:*
+connect -assert -port ff DATAIN a
+connect -assert -port ff SLOAD s
+connect -assert -port ff SDATA b
+connect -assert -port ff CLK clk
+connect -assert -port ff ENA en
+connect -assert -port ff ACLR 1'b1
+connect -assert -port ff SCLR 1'b0
+connect -assert -port ff Q q_alias
+connect -assert -port mux A a
+connect -assert -port mux B b
+connect -assert -port mux S s
+connect -assert -port mux Y mux_alias
+
+design -load native
+cd ffmux_native
+connect -port mux A 2'b00; intel_alm_ffmux; \
+    select -assert-count 2 c:*; \
+    connect -assert -port ff DATAIN mux_alias; \
+    connect -assert -port ff SLOAD 1'b0; \
+    connect -assert -port ff SDATA 1'b0; \
+    connect -assert -port ff CLK clk; \
+    connect -assert -port ff ENA en; \
+    connect -assert -port ff ACLR 1'b1; \
+    connect -assert -port ff SCLR 1'b0; \
+    connect -assert -port ff Q q_alias; \
+    connect -assert -port mux A 2'b00; \
+    connect -assert -port mux B b; \
+    connect -assert -port mux S s; \
+    connect -assert -port mux Y mux_alias; \
+    connect -port mux A 1'b0
+intel_alm_ffmux; select -assert-count 2 c:*; \
+    connect -assert -port ff DATAIN 1'b0; \
+    connect -assert -port ff SLOAD s; \
+    connect -assert -port ff SDATA b; \
+    connect -assert -port ff CLK clk; \
+    connect -assert -port ff ENA en; \
+    connect -assert -port ff ACLR 1'b1; \
+    connect -assert -port ff SCLR 1'b0; \
+    connect -assert -port ff Q q_alias; \
+    connect -assert -port mux A 1'b0; \
+    connect -assert -port mux B b; \
+    connect -assert -port mux S s; \
+    connect -assert -port mux Y mux_alias
+
+# A genuinely missing FF control is read as a raw cell; hierarchy would
+# normalize/error on it before the pass could be tested.
+design -load read
+read_verilog -lib +/intel_alm/common/dff_sim.v
+cd ffmux_missing
+intel_alm_ffmux
+select -assert-count 2 c:*
+connect -assert -port ff DATAIN selected
+connect -assert -port ff SLOAD 1'0
+
+# Unsupported constants and unknown values must not become load controls.
+design -load native
+cd ffmux_native
+connect -port mux S 1'0
+intel_alm_ffmux
+connect -assert -port mux S 1'0
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+
+design -load native
+cd ffmux_native
+connect -port mux A 1'x
+intel_alm_ffmux
+connect -assert -port mux A 1'x
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+
+design -load native
+cd ffmux_native
+connect -port mux S 1'z
+intel_alm_ffmux
+connect -assert -port mux S 1'z
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+
+# Native state initialized to one is not a physical INIT mode. Even a wire
+# attribute carrying one is outside admission; logical init1 is tested above.
+design -load native
+cd ffmux_native
+setattr -set init 1'b1 w:q_alias
+intel_alm_ffmux
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+select -assert-count 1 w:q_alias a:init=1'b1 %i
+
+# Missing, unknown and multiple drivers are independently rejected. These
+# intentionally invalid graphs must never be passed to equivalence/check.
+design -load read
+read_verilog -lib +/intel_alm/common/dff_sim.v
+cd ffmux_undriven
+intel_alm_ffmux
+select -assert-count 2 c:*
+connect -assert -port ff DATAIN selected
+connect -assert -port ff SLOAD 1'0
+connect -assert -port mux A a
+
+design -load read
+read_verilog -lib +/intel_alm/common/dff_sim.v
+cd ffmux_unknown
+intel_alm_ffmux
+select -assert-count 3 c:*
+connect -assert -port ff DATAIN selected
+connect -assert -port ff SLOAD 1'0
+connect -assert -port driver Y unknown
+
+design -load read
+read_verilog -lib +/intel_alm/common/dff_sim.v
+cd ffmux_multiple
+intel_alm_ffmux
+select -assert-count 4 c:*
+connect -assert -port ff DATAIN selected
+connect -assert -port ff SLOAD 1'0
+connect -assert -port mux A collided
+connect -assert -port driver0 Y collided
+connect -assert -port driver1 Y collided
+
+# A module input is already a driver: aliasing the mux output to it creates
+# an independent second driver of DATAIN, despite an otherwise valid mux.
+design -load native
+cd ffmux_native
+connect -nounset -set mux_alias a
+intel_alm_ffmux
+select -assert-count 2 c:*
+connect -assert -port ff DATAIN a
+connect -assert -port ff SLOAD 1'0
+connect -assert -port mux Y a
+
+# The same ambiguity on the FF Q alias must also fail closed.
+design -load native
+cd ffmux_native
+connect -nounset -set q_alias b
+intel_alm_ffmux
+select -assert-count 2 c:*
+connect -assert -port ff DATAIN mux_alias
+connect -assert -port ff SLOAD 1'0
+connect -assert -port ff Q b
+
+# Protected raw aliases tied to S0 must survive canonicalization. No opt or
+# hierarchy normalization is run before admission. The first assertions
+# require the frontend actually to retain those raw references, rather than
+# accidentally testing only a canonical constant. Other ordinary S0 controls
+# in this very same graph must not be blocked by the protected aliases.
+design -load read
+read_verilog -lib +/intel_alm/common/dff_sim.v
+cd ffmux_protected_zero
+connect -nomap -assert -port guarded_load SLOAD protected_load_zero
+connect -nomap -assert -port guarded_data SDATA protected_data_zero
+select -assert-count 1 w:protected_load_zero a:keep=1 %i
+select -assert-count 1 w:protected_data_zero a:dont_touch=1 %i
+intel_alm_ffmux
+select -assert-count 6 c:*
+select -assert-count 3 t:MISTRAL_FF
+select -assert-count 3 t:$_MUX_
+connect -nomap -assert -port guarded_load DATAIN selected_load
+connect -nomap -assert -port guarded_load SLOAD protected_load_zero
+connect -nomap -assert -port guarded_load SDATA 1'b0
+connect -nomap -assert -port guarded_load CLK clk
+connect -nomap -assert -port guarded_load ENA en
+connect -nomap -assert -port guarded_load ACLR 1'b1
+connect -nomap -assert -port guarded_load SCLR 1'b0
+connect -nomap -assert -port guarded_load Q q[0]
+connect -nomap -assert -port guarded_data DATAIN selected_data
+connect -nomap -assert -port guarded_data SLOAD 1'b0
+connect -nomap -assert -port guarded_data SDATA protected_data_zero
+connect -nomap -assert -port guarded_data CLK clk
+connect -nomap -assert -port guarded_data ENA en
+connect -nomap -assert -port guarded_data ACLR 1'b1
+connect -nomap -assert -port guarded_data SCLR 1'b0
+connect -nomap -assert -port guarded_data Q q[1]
+connect -nomap -assert -port plain DATAIN a
+connect -nomap -assert -port plain SDATA b
+connect -nomap -assert -port plain SLOAD s
+connect -nomap -assert -port plain CLK clk
+connect -nomap -assert -port plain ENA en
+connect -nomap -assert -port plain ACLR 1'b1
+connect -nomap -assert -port plain SCLR 1'b0
+connect -nomap -assert -port plain Q q[2]
+connect -nomap -assert -port mux_load A a
+connect -nomap -assert -port mux_load B b
+connect -nomap -assert -port mux_load S s
+connect -nomap -assert -port mux_load Y selected_load
+connect -nomap -assert -port mux_data A a
+connect -nomap -assert -port mux_data B b
+connect -nomap -assert -port mux_data S s
+connect -nomap -assert -port mux_data Y selected_data
+connect -nomap -assert -port mux_plain A a
+connect -nomap -assert -port mux_plain B b
+connect -nomap -assert -port mux_plain S s
+connect -nomap -assert -port mux_plain Y selected_plain
+select -assert-count 1 w:protected_load_zero a:keep=1 %i
+select -assert-count 1 w:protected_data_zero a:dont_touch=1 %i
+
+# Remove one protection flag at a time, leaving every cell, alias and
+# constant tie in place. The other protected consumer must remain untouched.
+setattr -unset keep w:protected_load_zero
+intel_alm_ffmux
+select -assert-count 6 c:*
+connect -nomap -assert -port guarded_load DATAIN a
+connect -nomap -assert -port guarded_load SDATA b
+connect -nomap -assert -port guarded_load SLOAD s
+connect -nomap -assert -port guarded_load CLK clk
+connect -nomap -assert -port guarded_load ENA en
+connect -nomap -assert -port guarded_load ACLR 1'b1
+connect -nomap -assert -port guarded_load SCLR 1'b0
+connect -nomap -assert -port guarded_load Q q[0]
+connect -nomap -assert -port guarded_data DATAIN selected_data
+connect -nomap -assert -port guarded_data SDATA protected_data_zero
+connect -nomap -assert -port guarded_data SLOAD 1'b0
+connect -nomap -assert -port guarded_data CLK clk
+connect -nomap -assert -port guarded_data ENA en
+connect -nomap -assert -port guarded_data ACLR 1'b1
+connect -nomap -assert -port guarded_data SCLR 1'b0
+connect -nomap -assert -port guarded_data Q q[1]
+connect -nomap -assert -port plain DATAIN a
+connect -nomap -assert -port plain SDATA b
+connect -nomap -assert -port plain SLOAD s
+select -assert-none w:protected_load_zero a:keep=1 %i
+select -assert-count 1 w:protected_data_zero a:dont_touch=1 %i
+
+# Removing the second protection flag must enable the remaining consumer.
+# The earlier conversions and every clock/enable/Q/reset stay exact.
+setattr -unset dont_touch w:protected_data_zero
+intel_alm_ffmux
+select -assert-count 6 c:*
+select -assert-count 3 t:MISTRAL_FF
+select -assert-count 3 t:$_MUX_
+connect -nomap -assert -port guarded_load DATAIN a
+connect -nomap -assert -port guarded_load SDATA b
+connect -nomap -assert -port guarded_load SLOAD s
+connect -nomap -assert -port guarded_load CLK clk
+connect -nomap -assert -port guarded_load ENA en
+connect -nomap -assert -port guarded_load ACLR 1'b1
+connect -nomap -assert -port guarded_load SCLR 1'b0
+connect -nomap -assert -port guarded_load Q q[0]
+connect -nomap -assert -port guarded_data DATAIN a
+connect -nomap -assert -port guarded_data SDATA b
+connect -nomap -assert -port guarded_data SLOAD s
+connect -nomap -assert -port guarded_data CLK clk
+connect -nomap -assert -port guarded_data ENA en
+connect -nomap -assert -port guarded_data ACLR 1'b1
+connect -nomap -assert -port guarded_data SCLR 1'b0
+connect -nomap -assert -port guarded_data Q q[1]
+connect -nomap -assert -port plain DATAIN a
+connect -nomap -assert -port plain SDATA b
+connect -nomap -assert -port plain SLOAD s
+connect -nomap -assert -port plain Q q[2]
+connect -nomap -assert -port plain CLK clk
+connect -nomap -assert -port plain ENA en
+connect -nomap -assert -port plain ACLR 1'b1
+connect -nomap -assert -port plain SCLR 1'b0
+connect -nomap -assert -port mux_load A a
+connect -nomap -assert -port mux_load B b
+connect -nomap -assert -port mux_load S s
+connect -nomap -assert -port mux_load Y selected_load
+connect -nomap -assert -port mux_data A a
+connect -nomap -assert -port mux_data B b
+connect -nomap -assert -port mux_data S s
+connect -nomap -assert -port mux_data Y selected_data
+connect -nomap -assert -port mux_plain A a
+connect -nomap -assert -port mux_plain B b
+connect -nomap -assert -port mux_plain S s
+connect -nomap -assert -port mux_plain Y selected_plain
+select -assert-none w:protected_load_zero a:keep=1 %i
+select -assert-none w:protected_data_zero a:dont_touch=1 %i

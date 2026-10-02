@@ -52,6 +52,10 @@ struct SynthIntelALMPass : public ScriptPass {
 		log("        pass DFFs to ABC to perform sequential logic optimisations\n");
 		log("        (EXPERIMENTAL)\n");
 		log("\n");
+		log("    -ffmux\n");
+		log("        absorb direct data muxes into unused native FF SLOAD/SDATA inputs\n");
+		log("        before ABC9 (EXPERIMENTAL, default off; may affect LAB packing)\n");
+		log("\n");
 		log("    -run <from_label>:<to_label>\n");
 		log("        only run the commands between the labels (see below). an empty\n");
 		log("        from label is synonymous to 'begin', and empty to label is\n");
@@ -78,7 +82,7 @@ struct SynthIntelALMPass : public ScriptPass {
 	}
 
 	string top_opt, family_opt, bram_type;
-	bool flatten, nolutram, nobram, dff, nodsp, noiopad, noclkbuf;
+	bool flatten, nolutram, nobram, dff, ffmux, nodsp, noiopad, noclkbuf;
 
 	void clear_flags() override
 	{
@@ -89,6 +93,7 @@ struct SynthIntelALMPass : public ScriptPass {
 		nolutram = false;
 		nobram = false;
 		dff = false;
+		ffmux = false;
 		nodsp = false;
 		noiopad = false;
 		noclkbuf = false;
@@ -135,6 +140,10 @@ struct SynthIntelALMPass : public ScriptPass {
 			}
 			if (args[argidx] == "-dff") {
 				dff = true;
+				continue;
+			}
+			if (args[argidx] == "-ffmux") {
+				ffmux = true;
 				continue;
 			}
 			if (args[argidx] == "-noiopad") {
@@ -299,6 +308,10 @@ struct SynthIntelALMPass : public ScriptPass {
 			run("techmap -map +/intel_alm/common/dff_map.v");
 			run("opt -full -undriven -mux_undef");
 			run("clean -purge");
+			if (ffmux || help_mode) {
+				run("intel_alm_ffmux", "(only with -ffmux)");
+				run("opt_clean", "(only with -ffmux)");
+			}
 			if (!noclkbuf)
 				run("clkbufmap -buf MISTRAL_CLKBUF Q:A", "(unless -noclkbuf)");
 		}

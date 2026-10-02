@@ -1,3 +1,7 @@
+yosys_pass(intel_alm_ffmux
+	intel_alm_ffmux.cc
+)
+
 yosys_pass(synth_intel_alm
 	synth_intel_alm.cc
 	REQUIRES
@@ -14,6 +18,7 @@ yosys_pass(synth_intel_alm
 		fsm
 		hierarchy
 		iopadmap
+		intel_alm_ffmux
 		memory
 		memory_bram
 		memory_dff
