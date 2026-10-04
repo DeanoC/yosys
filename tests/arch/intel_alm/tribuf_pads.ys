@@ -4,13 +4,23 @@ cd tribuf_pads
 # Both tri-state ports become MISTRAL_IO pads; no $_TBUF_ is left for the
 # place-and-route tool.
 select -assert-none t:$_TBUF_
-select -assert-count 2 t:MISTRAL_IO
+select -assert-count 3 t:MISTRAL_IO
 select -assert-count 2 t:MISTRAL_IB
-select -assert-count 1 t:MISTRAL_OB
-# Both pads take their data on I and their enable on OE, each a single net
+select -assert-count 2 t:MISTRAL_OB
+# The pads take their data on I and their enable on OE, each a single net
 # from an input buffer (a and en).
 select -assert-count 1 t:MISTRAL_IO %ci1:+[I] w:* %i t:MISTRAL_IB %co1:+[O] w:* %i %i
 select -assert-count 1 t:MISTRAL_IO %ci1:+[OE] w:* %i t:MISTRAL_IB %co1:+[O] w:* %i %i
 select -assert-count 0 t:MISTRAL_IO %ci1:+[I] w:* %i t:MISTRAL_IO %ci1:+[OE] w:* %i %i
-# The inout read-back comes from the pad's O output, not the driven value.
-select -assert-count 1 t:MISTRAL_IO %co1:+[O] w:* %i t:MISTRAL_OB %ci1:+[I] w:* %i %i
+# Inout and output read-back both come from the pad's O, not the driven value.
+select -assert-count 2 t:MISTRAL_IO %co1:+[O] w:* %i t:MISTRAL_OB %ci1:+[I] w:* %i %i
+# o_read stays the tri-state pad. o_rb is an output buffer of that pad.
+# opt_clean must not move the driver onto the reader.
+select -assert-count 1 w:o_read %x:+[PAD] t:MISTRAL_IO %i
+select -assert-none w:o_read %x:+[PAD] t:MISTRAL_OB %i
+select -assert-count 1 w:o_rb %x:+[PAD] t:MISTRAL_OB %i
+select -assert-none w:o_rb %x:+[PAD] t:MISTRAL_IO %i
+select -assert-none i:o_read
+select -assert-none i:o_rb
+select -assert-none i:o_tri
+select -assert-count 1 i:io_rb

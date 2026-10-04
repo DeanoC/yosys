@@ -26,6 +26,109 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
+// iopadmap -toutpad has no pad read-back port: it connects an output net to the
+// data input. A tri-state output that is also read must take the -tinoutpad
+// path (OE, O, I, PAD) so the read sees MISTRAL_IO.O. Promote those ports to
+// inout before opt_clean, then restore the output direction after iopadmap.
+// opt_clean keeps a port_input wire, and otherwise the lexicographically
+// smaller public name, so a reader named o_rb would take the driver from
+// o_read if the port were still output-only.
+struct PromotedTristateOutput
+{
+	RTLIL::Module *module;
+	RTLIL::IdString name;
+};
+
+bool sig_reads(const RTLIL::SigSpec &sig, RTLIL::SigBit bit)
+{
+	for (auto other : sig)
+		if (other == bit)
+			return true;
+	return false;
+}
+
+std::vector<PromotedTristateOutput> promote_read_tristate_outputs(RTLIL::Design *design)
+{
+	std::vector<PromotedTristateOutput> promoted;
+	if (design == nullptr)
+		return promoted;
+	for (auto module : design->selected_unboxed_whole_modules()) {
+		pool<RTLIL::SigBit> tri_y;
+		for (auto cell : module->selected_cells()) {
+			if (!cell->type.in(ID($tribuf), ID($_TBUF_)))
+				continue;
+			for (auto bit : cell->getPort(ID::Y))
+				if (bit.wire != nullptr)
+					tri_y.insert(bit);
+		}
+		for (auto wire : module->selected_wires()) {
+			if (!wire->port_output || wire->port_input || wire->width < 1)
+				continue;
+			bool all_tristate = true;
+			bool any_read = false;
+			for (int i = 0; all_tristate && i < wire->width; i++) {
+				RTLIL::SigBit bit(wire, i);
+				bool driven = tri_y.count(bit);
+				if (!driven) {
+					for (auto &conn : module->connections()) {
+						for (int k = 0; k < GetSize(conn.first) && k < GetSize(conn.second); k++)
+							if (conn.first[k] == bit && tri_y.count(conn.second[k]))
+								driven = true;
+					}
+				}
+				if (!driven) {
+					all_tristate = false;
+					break;
+				}
+				for (auto cell : module->selected_cells()) {
+					for (auto &conn : cell->connections())
+						if (cell->input(conn.first) && sig_reads(conn.second, bit))
+							any_read = true;
+				}
+				for (auto &conn : module->connections())
+					if (sig_reads(conn.second, bit))
+						any_read = true;
+			}
+			if (!all_tristate || !any_read)
+				continue;
+			wire->port_input = true;
+			promoted.push_back({module, wire->name});
+		}
+	}
+	return promoted;
+}
+
+void restore_promoted_tristate_outputs(const std::vector<PromotedTristateOutput> &promoted)
+{
+	RTLIL::IdString io_type = RTLIL::escape_id("MISTRAL_IO");
+	RTLIL::IdString pad_port = RTLIL::escape_id("PAD");
+	RTLIL::IdString read_port = RTLIL::escape_id("O");
+	for (const auto &item : promoted) {
+		RTLIL::Wire *port = item.module->wire(item.name);
+		if (port == nullptr || !port->port_output)
+			log_error("tri-state output %s disappeared during pad mapping\n", log_id(item.name));
+		port->port_input = false;
+		bool mapped = false;
+		for (auto cell : item.module->cells()) {
+			if (cell->type != io_type || !cell->hasPort(pad_port))
+				continue;
+			bool mine = false;
+			for (auto bit : cell->getPort(pad_port))
+				if (bit.wire == port)
+					mine = true;
+			if (!mine)
+				continue;
+			mapped = true;
+			if (!cell->hasPort(read_port) || GetSize(cell->getPort(read_port)) == 0)
+				log_error("tri-state output %s is read, but its MISTRAL_IO has no O read-back\n",
+						log_id(item.name));
+		}
+		if (!mapped)
+			log_error("tri-state output %s was not mapped to MISTRAL_IO\n", log_id(item.name));
+		item.module->fixup_ports();
+	}
+}
+
 struct SynthIntelALMPass : public ScriptPass {
 	SynthIntelALMPass() : ScriptPass("synth_intel_alm", "synthesis for ALM-based Intel (Altera) FPGAs.") {}
 
@@ -183,6 +286,8 @@ struct SynthIntelALMPass : public ScriptPass {
 		}
 
 		if (check_label("coarse")) {
+			// Filled before opt_clean and consumed after iopadmap.
+			std::vector<PromotedTristateOutput> promoted_tristate;
 			run("proc");
 			if (flatten || help_mode) {
 				run("check");
@@ -190,6 +295,10 @@ struct SynthIntelALMPass : public ScriptPass {
 			}
 			run("tribuf -logic");
 			run("deminout");
+			if (!help_mode && !noiopad) {
+				auto found = promote_read_tristate_outputs(active_design);
+				promoted_tristate.insert(promoted_tristate.end(), found.begin(), found.end());
+			}
 			run("opt_expr");
 			run("check");
 			run("opt_clean");
@@ -245,7 +354,16 @@ struct SynthIntelALMPass : public ScriptPass {
 						tribufs |= cell->type == ID($tribuf);
 				if (tribufs)
 					run("techmap t:$tribuf", "(unless -noiopad, if the design has tri-state drivers)");
+				// -toutpad wires the output net to I. Promote a tri-state output
+				// that is read inside the module so iopadmap uses -tinoutpad and
+				// the read stays on O, then make the port an output again.
+				if (!help_mode) {
+					auto found = promote_read_tristate_outputs(active_design);
+					promoted_tristate.insert(promoted_tristate.end(), found.begin(), found.end());
+				}
 				run("iopadmap -bits -outpad MISTRAL_OB I:PAD -inpad MISTRAL_IB O:PAD -toutpad MISTRAL_IO OE:I:PAD -tinoutpad MISTRAL_IO OE:O:I:PAD A:top", "(unless -noiopad)");
+				if (!help_mode)
+					restore_promoted_tristate_outputs(promoted_tristate);
 			}
 			run("techmap -map +/intel_alm/common/arith_alm_map.v -map +/intel_alm/common/dsp_map.v");
 			run("opt");
