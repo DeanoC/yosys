@@ -233,8 +233,20 @@ struct SynthIntelALMPass : public ScriptPass {
 				run("chtype -set $mul t:$__soft_mul");
 			}
 			run("alumacc");
-			if (!noiopad)
-				run("iopadmap -bits -outpad MISTRAL_OB I:PAD -inpad MISTRAL_IB O:PAD -toutpad MISTRAL_IO OE:O:PAD -tinoutpad MISTRAL_IO OE:O:I:PAD A:top", "(unless -noiopad)");
+			if (!noiopad) {
+				// iopadmap merges only fine-grained $_TBUF_ cells, so lower the
+				// top-level tri-state drivers first. Only do so when there are
+				// any: techmap advances the auto-generated names even when it
+				// maps nothing. MISTRAL_IO takes the driven value on I and
+				// returns the pad value on O.
+				bool tribufs = help_mode;
+				for (auto module : help_mode ? std::vector<RTLIL::Module*>() : active_design->selected_whole_modules())
+					for (auto cell : module->selected_cells())
+						tribufs |= cell->type == ID($tribuf);
+				if (tribufs)
+					run("techmap t:$tribuf", "(unless -noiopad, if the design has tri-state drivers)");
+				run("iopadmap -bits -outpad MISTRAL_OB I:PAD -inpad MISTRAL_IB O:PAD -toutpad MISTRAL_IO OE:I:PAD -tinoutpad MISTRAL_IO OE:O:I:PAD A:top", "(unless -noiopad)");
+			}
 			run("techmap -map +/intel_alm/common/arith_alm_map.v -map +/intel_alm/common/dsp_map.v");
 			run("opt");
 			run("memory -nomap");
