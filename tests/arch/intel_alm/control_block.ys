@@ -1,0 +1,11 @@
+read_verilog control_block.v
+synth_intel_alm -family cyclonev -nobram -nolutram -nodsp -noclkbuf -top top
+cd top
+select -assert-count 1 t:cyclonev_chipidblock
+select -assert-count 1 t:cyclonev_crcblock
+select -assert-count 1 t:cyclonev_opregblock
+select -assert-count 1 t:cyclonev_jtag
+# The dedicated JTAG pins get no IO buffer; ordinary ports do.
+select -assert-count 1 t:cyclonev_jtag %ci:+[tck] w:altera_reserved_tck %i
+select -assert-count 1 t:cyclonev_jtag %co:+[tdo] w:altera_reserved_tdo %i
+select -assert-count 3 t:MISTRAL_IB

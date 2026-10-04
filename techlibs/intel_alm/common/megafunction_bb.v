@@ -707,6 +707,83 @@ output clkout1;
 
 endmodule
 
+// Control block atoms. Ports and parameters match the Cyclone V atoms.
+(* keep *)
+module cyclonev_chipidblock(clk, shiftnld, regout);
+
+parameter id_value = 64'hFFFFFFFFFFFFFFFF;
+parameter lpm_hint = "UNUSED";
+parameter lpm_type = "cyclonev_chipidblock";
+
+input clk;
+input shiftnld;
+output regout;
+
+endmodule
+
+(* keep *)
+module cyclonev_crcblock(clk, shiftnld, crcerror, regout, endofedfullchip);
+
+parameter crc_deld_disable = "false";
+parameter error_delay = 0;
+parameter error_dra_dl_bypass = "false";
+parameter lpm_hint = "UNUSED";
+parameter lpm_type = "cyclonev_crcblock";
+parameter oscillator_divider = 256;
+parameter quad_adj_err_correction = "false";
+parameter triple_adj_err_correction = "false";
+
+input clk;
+input shiftnld;
+output crcerror;
+output regout;
+output endofedfullchip;
+
+endmodule
+
+(* keep *)
+module cyclonev_opregblock(clk, shiftnld, regout);
+
+parameter lpm_type = "cyclonev_opregblock";
+
+input clk;
+input shiftnld;
+output regout;
+
+endmodule
+
+// tck, tms, tdi and tdo are the dedicated JTAG pins: top-level ports
+// connected to them get no IO buffer.
+(* keep *)
+module cyclonev_jtag(tms, tck, tdi, tdo, tdouser, tdoutap, tmsutap, tckutap, tdiutap, shiftuser, clkdruser,
+                     updateuser, runidleuser, usr1user, tmscore, tckcore, tdicore, tdocore, corectl, ntdopinena);
+
+parameter lpm_hint = "UNUSED";
+parameter lpm_type = "cyclonev_jtag";
+
+(* iopad_external_pin *) input tms;
+(* iopad_external_pin *) input tck;
+(* iopad_external_pin *) input tdi;
+(* iopad_external_pin *) output tdo;
+input tdouser;
+input tdoutap;
+output tmsutap;
+output tckutap;
+output tdiutap;
+output shiftuser;
+output clkdruser;
+output updateuser;
+output runidleuser;
+output usr1user;
+input tmscore;
+input tckcore;
+input tdicore;
+output tdocore;
+input corectl;
+input ntdopinena;
+
+endmodule
+
 // HPS interfaces
 (* keep *)
 module cyclonev_hps_interface_mpu_general_purpose(gp_in, gp_out);
