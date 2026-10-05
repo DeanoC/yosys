@@ -127,6 +127,9 @@ std::vector<PromotedTristateOutput> promote_read_tristate_outputs(RTLIL::Design 
 	if (design == nullptr)
 		return promoted;
 	for (auto module : design->selected_unboxed_whole_modules()) {
+		// Match the A:top selection used by iopadmap, including -noflatten.
+		if (!module->get_bool_attribute(ID::top))
+			continue;
 		dict<RTLIL::SigBit, pool<RTLIL::SigBit>> aliases;
 		for (auto &conn : module->connections())
 			for (int i = 0; i < GetSize(conn.first); i++)
