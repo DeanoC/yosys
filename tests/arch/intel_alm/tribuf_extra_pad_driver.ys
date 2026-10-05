@@ -1,0 +1,55 @@
+read_verilog tribuf_extra_pad_driver.v
+synth_intel_alm -family cyclonev -top extra_pad_driver -noclkbuf
+cd extra_pad_driver
+select -assert-count 2 t:MISTRAL_IO
+select -assert-count 4 t:MISTRAL_IB
+select -assert-none t:MISTRAL_OB t:$_TBUF_ i:pad i:other_pad
+select -assert-count 1 w:pad %x:+[PAD] t:MISTRAL_IO %i
+select -assert-count 1 w:other_pad %x:+[PAD] t:MISTRAL_IO %i
+# The merged pad driver must retain both enables and both data sources.
+select -assert-count 1 w:pad %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i %ci* w:en1 %i
+select -assert-count 1 w:pad %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i %ci* w:en2 %i
+select -assert-count 1 w:pad %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i %ci* w:d1 %i
+select -assert-count 1 w:pad %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i %ci* w:d2 %i
+# The extra driver must not leak into the sibling's independent drive path.
+select -assert-count 1 w:other_pad %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i %ci* w:en1 %i
+select -assert-none w:other_pad %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i %ci* w:en2 %i
+select -assert-count 1 w:other_pad %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i %ci* w:d1 %i
+select -assert-none w:other_pad %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i %ci* w:d2 %i
+
+design -reset
+read_verilog tribuf_extra_pad_driver.v
+hierarchy -top extra_pad_driver -chparam WIDTH 2
+synth_intel_alm -family cyclonev -top extra_pad_driver -noclkbuf
+cd extra_pad_driver
+select -assert-count 4 t:MISTRAL_IO
+select -assert-count 5 t:MISTRAL_IB
+select -assert-none t:MISTRAL_OB t:$_TBUF_ i:pad i:other_pad
+splitnets -ports
+# Only bit zero of pad has the additional driver; the other three pins do not.
+select -assert-count 1 w:pad[0] %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i %ci* w:en2 %i
+select -assert-count 1 w:pad[0] %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i %ci* w:d2 %i
+select -assert-count 1 w:pad[1] %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i w:d1[1] %x:+[PAD] t:MISTRAL_IB %i %co1:+[O] w:* %i %i
+select -assert-none w:pad[1] %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i %ci* w:en2 %i
+select -assert-none w:pad[1] %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i %ci* w:d2 %i
+select -assert-none w:other_pad* %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i %ci* w:en2 %i
+select -assert-none w:other_pad* %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i %ci* w:d2 %i
+
+design -reset
+read_verilog tribuf_extra_pad_driver.v
+hierarchy -top extra_pad_driver -chparam WIDTH 2 -chparam INTERMEDIATE 1
+synth_intel_alm -family cyclonev -top extra_pad_driver -noclkbuf
+cd extra_pad_driver
+# An extra source on branch contributes only to pad[0], but its outgoing
+# assignment is also replaced by sibling splitting. Preserve that source too.
+select -assert-count 4 t:MISTRAL_IO
+select -assert-count 5 t:MISTRAL_IB
+select -assert-none t:MISTRAL_OB t:$_TBUF_ i:pad i:other_pad
+splitnets -ports
+select -assert-count 1 w:pad[0] %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i %ci* w:en1 %i
+select -assert-count 1 w:pad[0] %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i %ci* w:en2 %i
+select -assert-count 1 w:pad[0] %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i %ci* w:d1[0] %i
+select -assert-count 1 w:pad[0] %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i %ci* w:d2 %i
+select -assert-none w:pad[1] %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i %ci* w:en2 %i
+select -assert-none w:other_pad* %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i %ci* w:en2 %i
+select -assert-none w:other_pad* %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i %ci* w:d2 %i

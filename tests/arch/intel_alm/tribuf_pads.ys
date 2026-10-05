@@ -1,0 +1,30 @@
+read_verilog tribuf_pads.v
+synth_intel_alm -family cyclonev -top tribuf_pads -noclkbuf
+cd tribuf_pads
+# All three tri-state ports become MISTRAL_IO pads; no $_TBUF_ is left for the
+# place-and-route tool.
+select -assert-none t:$_TBUF_
+select -assert-count 3 t:MISTRAL_IO
+select -assert-count 6 t:MISTRAL_IB
+select -assert-count 2 t:MISTRAL_OB
+# Check each pad against its own data and enable input buffers. Distinct
+# inputs ensure that swapped connections between pads cannot pass.
+select -assert-count 1 w:o_tri %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i w:a %x:+[PAD] t:MISTRAL_IB %i %co1:+[O] w:* %i %i
+select -assert-count 1 w:o_tri %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i w:en %x:+[PAD] t:MISTRAL_IB %i %co1:+[O] w:* %i %i
+select -assert-count 1 w:io_rb %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i w:io_a %x:+[PAD] t:MISTRAL_IB %i %co1:+[O] w:* %i %i
+select -assert-count 1 w:io_rb %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i w:io_en %x:+[PAD] t:MISTRAL_IB %i %co1:+[O] w:* %i %i
+select -assert-count 1 w:o_read %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i w:read_a %x:+[PAD] t:MISTRAL_IB %i %co1:+[O] w:* %i %i
+select -assert-count 1 w:o_read %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i w:read_en %x:+[PAD] t:MISTRAL_IB %i %co1:+[O] w:* %i %i
+# Each reader must receive its own pad's O, not the driven data or another pad.
+select -assert-count 1 w:io_rb %x:+[PAD] t:MISTRAL_IO %i %co1:+[O] w:* %i w:rb %x:+[PAD] t:MISTRAL_OB %i %ci1:+[I] w:* %i %i
+select -assert-count 1 w:o_read %x:+[PAD] t:MISTRAL_IO %i %co1:+[O] w:* %i w:o_rb %x:+[PAD] t:MISTRAL_OB %i %ci1:+[I] w:* %i %i
+# o_read stays the tri-state pad. o_rb is an output buffer of that pad.
+# opt_clean must not move the driver onto the reader.
+select -assert-count 1 w:o_read %x:+[PAD] t:MISTRAL_IO %i
+select -assert-none w:o_read %x:+[PAD] t:MISTRAL_OB %i
+select -assert-count 1 w:o_rb %x:+[PAD] t:MISTRAL_OB %i
+select -assert-none w:o_rb %x:+[PAD] t:MISTRAL_IO %i
+select -assert-none i:o_read
+select -assert-none i:o_rb
+select -assert-none i:o_tri
+select -assert-count 1 i:io_rb
