@@ -37,6 +37,7 @@ struct PromotedTristateOutput
 {
 	RTLIL::Module *module;
 	RTLIL::IdString name;
+	pool<int> tristate_bits;
 };
 
 bool sig_reads(const RTLIL::SigSpec &sig, RTLIL::SigBit bit)
@@ -64,9 +65,9 @@ std::vector<PromotedTristateOutput> promote_read_tristate_outputs(RTLIL::Design 
 		for (auto wire : module->selected_wires()) {
 			if (!wire->port_output || wire->port_input || wire->width < 1)
 				continue;
-			bool all_tristate = true;
 			bool any_read = false;
-			for (int i = 0; all_tristate && i < wire->width; i++) {
+			pool<int> tristate_bits;
+			for (int i = 0; i < wire->width; i++) {
 				RTLIL::SigBit bit(wire, i);
 				bool driven = tri_y.count(bit);
 				if (!driven) {
@@ -76,10 +77,9 @@ std::vector<PromotedTristateOutput> promote_read_tristate_outputs(RTLIL::Design 
 								driven = true;
 					}
 				}
-				if (!driven) {
-					all_tristate = false;
-					break;
-				}
+				if (!driven)
+					continue;
+				tristate_bits.insert(i);
 				for (auto cell : module->selected_cells()) {
 					for (auto &conn : cell->connections())
 						if (cell->input(conn.first) && sig_reads(conn.second, bit))
@@ -89,10 +89,12 @@ std::vector<PromotedTristateOutput> promote_read_tristate_outputs(RTLIL::Design 
 					if (sig_reads(conn.second, bit))
 						any_read = true;
 			}
-			if (!all_tristate || !any_read)
+			if (!any_read)
 				continue;
+			// Port direction applies to the whole bus. iopadmap uses OE=1
+			// for its always-driven bits; only tri-state bits need read-back.
 			wire->port_input = true;
-			promoted.push_back({module, wire->name});
+			promoted.push_back({module, wire->name, tristate_bits});
 		}
 	}
 	return promoted;
@@ -114,7 +116,7 @@ void restore_promoted_tristate_outputs(const std::vector<PromotedTristateOutput>
 				continue;
 			bool mine = false;
 			for (auto bit : cell->getPort(pad_port))
-				if (bit.wire == port)
+				if (bit.wire == port && item.tristate_bits.count(bit.offset))
 					mine = true;
 			if (!mine)
 				continue;
