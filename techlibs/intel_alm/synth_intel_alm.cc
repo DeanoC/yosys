@@ -27,7 +27,8 @@ USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
 pool<RTLIL::SigBit> first_output_bits(RTLIL::SigBit start,
-		const dict<RTLIL::SigBit, pool<RTLIL::SigBit>> &aliases)
+		const dict<RTLIL::SigBit, pool<RTLIL::SigBit>> &aliases,
+		pool<std::pair<RTLIL::SigBit, RTLIL::SigBit>> *assignments = nullptr)
 {
 	std::vector<RTLIL::SigBit> pending = {start};
 	pool<RTLIL::SigBit> visited, outputs;
@@ -41,8 +42,11 @@ pool<RTLIL::SigBit> first_output_bits(RTLIL::SigBit start,
 			continue;
 		}
 		if (aliases.count(bit))
-			for (auto next : aliases.at(bit))
+			for (auto next : aliases.at(bit)) {
+				if (assignments != nullptr && next.wire != nullptr && next.wire->port_output)
+					assignments->insert({next, bit});
 				pending.push_back(next);
+			}
 	}
 	return outputs;
 }
@@ -66,28 +70,62 @@ void split_shared_tristate_outputs(RTLIL::Design *design)
 		for (auto &conn : module->connections())
 			for (int i = 0; i < GetSize(conn.first); i++)
 				aliases[conn.second[i]].insert(conn.first[i]);
-		pool<RTLIL::SigBit> split_outputs;
+		struct DriverPaths {
+			RTLIL::Cell *cell;
+			int offset;
+			pool<std::pair<RTLIL::SigBit, RTLIL::SigBit>> assignments;
+		};
+		std::vector<DriverPaths> paths;
+		pool<std::pair<RTLIL::SigBit, RTLIL::SigBit>> split_assignments;
 		for (auto cell : tristates) {
 			auto sig_y = cell->getPort(ID::Y);
 			for (int i = 0; i < GetSize(sig_y); i++) {
-				auto outputs = first_output_bits(sig_y[i], aliases);
-				if (GetSize(outputs) < 2)
-					continue;
-				for (auto bit : outputs) {
-					auto clone = module->addTribuf(NEW_ID, cell->getPort(ID::A)[i],
-							cell->getPort(cell->type == ID($tribuf) ? ID::EN : ID::E), bit);
-					clone->attributes = cell->attributes;
-					split_outputs.insert(bit);
-				}
+				pool<std::pair<RTLIL::SigBit, RTLIL::SigBit>> assignments;
+				auto outputs = first_output_bits(sig_y[i], aliases, &assignments);
+				if (GetSize(outputs) >= 2)
+					split_assignments.insert(assignments.begin(), assignments.end());
+				paths.push_back({cell, i, std::move(assignments)});
 			}
 		}
-		if (split_outputs.empty())
+		if (split_assignments.empty())
 			continue;
+		// An intermediate alias can have additional tri-state drivers that
+		// reach just one pad. Clone every source contributing to a removed
+		// edge, not just the sources that initially caused the split.
+		pool<RTLIL::Cell *> bitwise_sources;
+		for (const auto &path : paths) {
+			pool<RTLIL::SigBit> outputs;
+			for (auto &assignment : path.assignments)
+				if (split_assignments.count(assignment))
+					outputs.insert(assignment.first);
+			for (auto bit : outputs) {
+				auto cell = path.cell;
+				auto clone = module->addTribuf(NEW_ID, cell->getPort(ID::A)[path.offset],
+						cell->getPort(cell->type == ID($tribuf) ? ID::EN : ID::E), bit);
+				clone->attributes = cell->attributes;
+				if (GetSize(cell->getPort(ID::Y)) > 1)
+					bitwise_sources.insert(cell);
+			}
+		}
+		// tribuf -logic groups drivers by their entire Y vector. Normalize
+		// affected original sources per bit so a scalar driver overlapping
+		// part of a vector merges correctly on the remaining internal net.
+		for (auto cell : bitwise_sources) {
+			auto sig_y = cell->getPort(ID::Y);
+			for (int i = 0; i < GetSize(sig_y); i++) {
+				auto bit_driver = module->addTribuf(NEW_ID, cell->getPort(ID::A)[i],
+						cell->getPort(ID::EN), sig_y[i]);
+				bit_driver->attributes = cell->attributes;
+			}
+			module->remove(cell);
+		}
 		std::vector<RTLIL::SigSig> connections;
 		for (auto &conn : module->connections()) {
 			RTLIL::SigSpec lhs, rhs;
 			for (int i = 0; i < GetSize(conn.first); i++) {
-				if (split_outputs.count(conn.first[i]))
+				// Remove only edges replaced by the cloned source, preserving
+				// independent drivers assigned to the same output bit.
+				if (split_assignments.count({conn.first[i], conn.second[i]}))
 					continue;
 				lhs.append(conn.first[i]);
 				rhs.append(conn.second[i]);
