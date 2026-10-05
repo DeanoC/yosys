@@ -26,6 +26,27 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
+pool<RTLIL::SigBit> first_output_bits(RTLIL::SigBit start,
+		const dict<RTLIL::SigBit, pool<RTLIL::SigBit>> &aliases)
+{
+	std::vector<RTLIL::SigBit> pending = {start};
+	pool<RTLIL::SigBit> visited, outputs;
+	while (!pending.empty()) {
+		auto bit = pending.back();
+		pending.pop_back();
+		if (!visited.insert(bit).second || bit.wire == nullptr)
+			continue;
+		if (bit.wire->port_output) {
+			outputs.insert(bit);
+			continue;
+		}
+		if (aliases.count(bit))
+			for (auto next : aliases.at(bit))
+				pending.push_back(next);
+	}
+	return outputs;
+}
+
 // Continuous assignments from an internal tri-state source to sibling output
 // ports drive independent pins. Split those drivers before opt_clean merges
 // aliases. Stop at the first output on each path: assignments that read that
@@ -49,21 +70,7 @@ void split_shared_tristate_outputs(RTLIL::Design *design)
 		for (auto cell : tristates) {
 			auto sig_y = cell->getPort(ID::Y);
 			for (int i = 0; i < GetSize(sig_y); i++) {
-				std::vector<RTLIL::SigBit> pending = {sig_y[i]};
-				pool<RTLIL::SigBit> visited, outputs;
-				while (!pending.empty()) {
-					auto bit = pending.back();
-					pending.pop_back();
-					if (!visited.insert(bit).second || bit.wire == nullptr)
-						continue;
-					if (bit.wire->port_output) {
-						outputs.insert(bit);
-						continue;
-					}
-					if (aliases.count(bit))
-						for (auto next : aliases.at(bit))
-							pending.push_back(next);
-				}
+				auto outputs = first_output_bits(sig_y[i], aliases);
 				if (GetSize(outputs) < 2)
 					continue;
 				for (auto bit : outputs) {
@@ -120,13 +127,20 @@ std::vector<PromotedTristateOutput> promote_read_tristate_outputs(RTLIL::Design 
 	if (design == nullptr)
 		return promoted;
 	for (auto module : design->selected_unboxed_whole_modules()) {
+		dict<RTLIL::SigBit, pool<RTLIL::SigBit>> aliases;
+		for (auto &conn : module->connections())
+			for (int i = 0; i < GetSize(conn.first); i++)
+				aliases[conn.second[i]].insert(conn.first[i]);
 		pool<RTLIL::SigBit> tri_y;
 		for (auto cell : module->selected_cells()) {
 			if (!cell->type.in(ID($tribuf), ID($_TBUF_)))
 				continue;
-			for (auto bit : cell->getPort(ID::Y))
-				if (bit.wire != nullptr)
-					tri_y.insert(bit);
+			for (auto bit : cell->getPort(ID::Y)) {
+				// Follow arbitrary assignment chains, stopping at the pad.
+				// Outputs that read that pad are not tri-state drivers.
+				auto outputs = first_output_bits(bit, aliases);
+				tri_y.insert(outputs.begin(), outputs.end());
+			}
 		}
 		for (auto wire : module->selected_wires()) {
 			if (!wire->port_output || wire->port_input || wire->width < 1)
@@ -135,15 +149,7 @@ std::vector<PromotedTristateOutput> promote_read_tristate_outputs(RTLIL::Design 
 			pool<int> tristate_bits;
 			for (int i = 0; i < wire->width; i++) {
 				RTLIL::SigBit bit(wire, i);
-				bool driven = tri_y.count(bit);
-				if (!driven) {
-					for (auto &conn : module->connections()) {
-						for (int k = 0; k < GetSize(conn.first) && k < GetSize(conn.second); k++)
-							if (conn.first[k] == bit && tri_y.count(conn.second[k]))
-								driven = true;
-					}
-				}
-				if (!driven)
+				if (!tri_y.count(bit))
 					continue;
 				tristate_bits.insert(i);
 				for (auto cell : module->selected_cells()) {

@@ -1,0 +1,27 @@
+read_verilog tribuf_alias_pads.v
+synth_intel_alm -family cyclonev -top alias_pad_read -noclkbuf
+cd alias_pad_read
+select -assert-count 1 t:MISTRAL_IO
+select -assert-count 1 t:MISTRAL_OB
+select -assert-count 2 t:MISTRAL_IB
+select -assert-none t:$_TBUF_ i:z_pad i:a_rb
+select -assert-count 1 w:z_pad %x:+[PAD] t:MISTRAL_IO %i
+select -assert-count 1 w:a_rb %x:+[PAD] t:MISTRAL_OB %i
+select -assert-count 1 w:z_pad %x:+[PAD] t:MISTRAL_IO %i %ci1:+[I] w:* %i w:d %x:+[PAD] t:MISTRAL_IB %i %co1:+[O] w:* %i %i
+select -assert-count 1 w:z_pad %x:+[PAD] t:MISTRAL_IO %i %ci1:+[OE] w:* %i w:en %x:+[PAD] t:MISTRAL_IB %i %co1:+[O] w:* %i %i
+select -assert-count 1 w:z_pad %x:+[PAD] t:MISTRAL_IO %i %co1:+[O] w:* %i w:a_rb %x:+[PAD] t:MISTRAL_OB %i %ci1:+[I] w:* %i %i
+
+design -reset
+read_verilog tribuf_alias_pads.v
+hierarchy -top alias_pad_read -chparam WIDTH 2
+synth_intel_alm -family cyclonev -top alias_pad_read -noclkbuf
+cd alias_pad_read
+select -assert-count 2 t:MISTRAL_IO
+select -assert-count 2 t:MISTRAL_OB
+select -assert-count 3 t:MISTRAL_IB
+select -assert-none t:$_TBUF_ i:z_pad i:a_rb
+splitnets -ports
+select -assert-count 2 w:z_pad* %x:+[PAD] t:MISTRAL_IO %i
+select -assert-count 2 w:a_rb* %x:+[PAD] t:MISTRAL_OB %i
+select -assert-count 1 w:z_pad[0] %x:+[PAD] t:MISTRAL_IO %i %co1:+[O] w:* %i w:a_rb[0] %x:+[PAD] t:MISTRAL_OB %i %ci1:+[I] w:* %i %i
+select -assert-count 1 w:z_pad[1] %x:+[PAD] t:MISTRAL_IO %i %co1:+[O] w:* %i w:a_rb[1] %x:+[PAD] t:MISTRAL_OB %i %ci1:+[I] w:* %i %i
