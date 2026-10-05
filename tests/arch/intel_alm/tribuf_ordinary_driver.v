@@ -3,7 +3,7 @@ module ordinary_driver(input a, output y);
 endmodule
 
 module tribuf_ordinary_driver #(
-    parameter WIDTH = 1, POSITION = 1, SOURCE = 0, SHARED = 1
+    parameter WIDTH = 1, POSITION = 1, SOURCE = 0, SHARED = 1, ENABLE = 0
 ) (
     input wire [WIDTH-1:0] d,
     input wire d2, en, clk,
@@ -11,7 +11,25 @@ module tribuf_ordinary_driver #(
 );
     wire [WIDTH-1:0] t, branch, next_branch;
     wire ordinary;
-    assign t = en ? d : {WIDTH{1'bz}};
+    wire driver_en, zero_alias, opaque;
+    assign zero_alias = 1'b0;
+    generate
+        if (ENABLE == 0) assign driver_en = en;
+        if (ENABLE == 1) assign driver_en = 1'b0;
+        if (ENABLE == 2) assign driver_en = zero_alias;
+        if (ENABLE == 3) assign driver_en = en & 1'b0;
+        if (ENABLE == 4) assign driver_en = ~(en | 1'b1);
+        if (ENABLE == 5) assign driver_en = en ? 1'b0 : 1'b0;
+        if (ENABLE == 6) assign driver_en = {zero_alias, zero_alias} + 2'b00;
+        if (ENABLE == 7) assign driver_en = 1'b1;
+        if (ENABLE == 8) assign driver_en = ~(en === 1'bx);
+        if (ENABLE == 9) assign driver_en = 1'bx;
+        if (ENABLE == 10) begin
+            ordinary_driver unknown_enable(.a(en), .y(opaque));
+            assign driver_en = opaque & 1'b0;
+        end
+    endgenerate
+    assign t = driver_en ? d : {WIDTH{1'bz}};
     assign branch = t;
     assign next_branch = branch;
     assign pad = next_branch;
