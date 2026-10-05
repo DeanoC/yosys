@@ -66,28 +66,74 @@ void split_shared_tristate_outputs(RTLIL::Design *design)
 				tristates.push_back(cell);
 		if (tristates.empty())
 			continue;
-		dict<RTLIL::SigBit, pool<RTLIL::SigBit>> aliases;
+		dict<RTLIL::SigBit, pool<RTLIL::SigBit>> aliases, incoming;
 		for (auto &conn : module->connections())
-			for (int i = 0; i < GetSize(conn.first); i++)
+			for (int i = 0; i < GetSize(conn.first); i++) {
 				aliases[conn.second[i]].insert(conn.first[i]);
+				incoming[conn.first[i]].insert(conn.second[i]);
+			}
+		pool<RTLIL::SigBit> ordinary_drivers, tristate_outputs;
+		for (auto wire : module->wires())
+			if (wire->port_input && !wire->port_output)
+				for (auto bit : RTLIL::SigSpec(wire))
+					ordinary_drivers.insert(bit);
+		CellTypes celltypes(design);
+		for (auto cell : module->cells()) {
+			if (cell->type.in(ID($tribuf), ID($_TBUF_)))
+				continue;
+			for (const auto &conn : cell->connections())
+				if (celltypes.cell_output(cell->type, conn.first))
+					for (auto bit : conn.second)
+						ordinary_drivers.insert(bit);
+		}
 		struct DriverPaths {
 			RTLIL::Cell *cell;
 			int offset;
 			pool<std::pair<RTLIL::SigBit, RTLIL::SigBit>> assignments;
 		};
 		std::vector<DriverPaths> paths;
-		pool<std::pair<RTLIL::SigBit, RTLIL::SigBit>> split_assignments;
+		pool<std::pair<RTLIL::SigBit, RTLIL::SigBit>> split_assignments, z_assignments;
 		for (auto cell : tristates) {
 			auto sig_y = cell->getPort(ID::Y);
 			for (int i = 0; i < GetSize(sig_y); i++) {
 				pool<std::pair<RTLIL::SigBit, RTLIL::SigBit>> assignments;
 				auto outputs = first_output_bits(sig_y[i], aliases, &assignments);
+				tristate_outputs.insert(outputs.begin(), outputs.end());
 				if (GetSize(outputs) >= 2)
 					split_assignments.insert(assignments.begin(), assignments.end());
 				paths.push_back({cell, i, std::move(assignments)});
 			}
 		}
-		if (split_assignments.empty())
+		// tribuf -logic merges mutually exclusive tri-state drivers, not an
+		// always-on driver contending with a tri-state driver. Reject this
+		// unsupported combination before removing aliases or lowering the
+		// internal buffers, which would otherwise drop or short drivers.
+		for (auto output : tristate_outputs) {
+			std::vector<RTLIL::SigBit> pending = {output};
+			pool<RTLIL::SigBit> visited;
+			while (!pending.empty()) {
+				auto bit = pending.back();
+				pending.pop_back();
+				if (!visited.insert(bit).second)
+					continue;
+				// Reading a different output contributes its resolved pad
+				// value, not its internal tri-state driver's enable.
+				if (ordinary_drivers.count(bit) || (bit.wire == nullptr && bit.data != RTLIL::State::Sz) ||
+						(bit != output && bit.wire != nullptr && bit.wire->port_output))
+					log_error("Cannot map tri-state output %s.%s: alias %s has a non-tri-state driver. "
+							"Use explicitly enabled tri-state drivers instead.\n",
+							log_id(module), log_signal(output), log_signal(bit));
+				if (incoming.count(bit))
+					for (auto source : incoming.at(bit)) {
+						// A Z assignment adds no driver. Leaving it as an
+						// alias would make SigMap replace the driven net by Z.
+						if (source == RTLIL::State::Sz)
+							z_assignments.insert({bit, source});
+						pending.push_back(source);
+					}
+			}
+		}
+		if (split_assignments.empty() && z_assignments.empty())
 			continue;
 		// An intermediate alias can have additional tri-state drivers that
 		// reach just one pad. Clone every source contributing to a removed
@@ -125,7 +171,8 @@ void split_shared_tristate_outputs(RTLIL::Design *design)
 			for (int i = 0; i < GetSize(conn.first); i++) {
 				// Remove only edges replaced by the cloned source, preserving
 				// independent drivers assigned to the same output bit.
-				if (split_assignments.count({conn.first[i], conn.second[i]}))
+				if (split_assignments.count({conn.first[i], conn.second[i]}) ||
+						z_assignments.count({conn.first[i], conn.second[i]}))
 					continue;
 				lhs.append(conn.first[i]);
 				rhs.append(conn.second[i]);
@@ -403,7 +450,9 @@ struct SynthIntelALMPass : public ScriptPass {
 		if (check_label("coarse")) {
 			// Filled before opt_clean and consumed after iopadmap.
 			std::vector<PromotedTristateOutput> promoted_tristate;
-			run("proc");
+			// Preserve directed driver paths until pad analysis. The default
+			// proc opt_expr can replace cell outputs by a contending constant.
+			run(noiopad ? "proc" : "proc -noopt");
 			if (flatten || help_mode) {
 				run("check");
 				run("flatten", "(skip if -noflatten)");
