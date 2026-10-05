@@ -26,6 +26,72 @@
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
+// Continuous assignments from an internal tri-state source to sibling output
+// ports drive independent pins. Split those drivers before opt_clean merges
+// aliases. Stop at the first output on each path: assignments that read that
+// output must remain on its pad read-back instead of becoming new drivers.
+void split_shared_tristate_outputs(RTLIL::Design *design)
+{
+	for (auto module : design->selected_unboxed_whole_modules()) {
+		if (!module->get_bool_attribute(ID::top))
+			continue;
+		std::vector<RTLIL::Cell *> tristates;
+		for (auto cell : module->selected_cells())
+			if (cell->type.in(ID($tribuf), ID($_TBUF_)))
+				tristates.push_back(cell);
+		if (tristates.empty())
+			continue;
+		dict<RTLIL::SigBit, pool<RTLIL::SigBit>> aliases;
+		for (auto &conn : module->connections())
+			for (int i = 0; i < GetSize(conn.first); i++)
+				aliases[conn.second[i]].insert(conn.first[i]);
+		pool<RTLIL::SigBit> split_outputs;
+		for (auto cell : tristates) {
+			auto sig_y = cell->getPort(ID::Y);
+			for (int i = 0; i < GetSize(sig_y); i++) {
+				std::vector<RTLIL::SigBit> pending = {sig_y[i]};
+				pool<RTLIL::SigBit> visited, outputs;
+				while (!pending.empty()) {
+					auto bit = pending.back();
+					pending.pop_back();
+					if (!visited.insert(bit).second || bit.wire == nullptr)
+						continue;
+					if (bit.wire->port_output) {
+						outputs.insert(bit);
+						continue;
+					}
+					if (aliases.count(bit))
+						for (auto next : aliases.at(bit))
+							pending.push_back(next);
+				}
+				if (GetSize(outputs) < 2)
+					continue;
+				for (auto bit : outputs) {
+					auto clone = module->addTribuf(NEW_ID, cell->getPort(ID::A)[i],
+							cell->getPort(cell->type == ID($tribuf) ? ID::EN : ID::E), bit);
+					clone->attributes = cell->attributes;
+					split_outputs.insert(bit);
+				}
+			}
+		}
+		if (split_outputs.empty())
+			continue;
+		std::vector<RTLIL::SigSig> connections;
+		for (auto &conn : module->connections()) {
+			RTLIL::SigSpec lhs, rhs;
+			for (int i = 0; i < GetSize(conn.first); i++) {
+				if (split_outputs.count(conn.first[i]))
+					continue;
+				lhs.append(conn.first[i]);
+				rhs.append(conn.second[i]);
+			}
+			if (!lhs.empty())
+				connections.emplace_back(lhs, rhs);
+		}
+		module->new_connections(connections);
+	}
+}
+
 // iopadmap -toutpad has no pad read-back port: it connects an output net to the
 // data input. A tri-state output that is also read must take the -tinoutpad
 // path (OE, O, I, PAD) so the read sees MISTRAL_IO.O. Promote those ports to
@@ -294,6 +360,11 @@ struct SynthIntelALMPass : public ScriptPass {
 			if (flatten || help_mode) {
 				run("check");
 				run("flatten", "(skip if -noflatten)");
+			}
+			if (!noiopad) {
+				run("tribuf");
+				if (!help_mode)
+					split_shared_tristate_outputs(active_design);
 			}
 			run("tribuf -logic");
 			run("deminout");
