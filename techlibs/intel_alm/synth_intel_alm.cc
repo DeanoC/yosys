@@ -484,15 +484,13 @@ void buffer_promoted_output_drivers(RTLIL::Design *design,
 		for (int offset : item.tristate_bits) {
 			auto module = item.module;
 			RTLIL::SigBit bit(module->wire(item.name), offset);
-			SigMap aliases(module);
 			dict<RTLIL::SigBit, pool<RTLIL::SigBit>> outgoing;
 			for (const auto &conn : module->connections())
 				for (int i = 0; i < GetSize(conn.first); i++)
 					outgoing[conn.second[i]].insert(conn.first[i]);
 			bool buffered = false, driven = false;
 			for (auto cell : module->cells()) {
-				if (cell->type.in(ID($tribuf), ID($_TBUF_)) &&
-						aliases(cell->getPort(cell->type == ID($tribuf) ? ID::EN : ID::E)) != RTLIL::State::S1)
+				if (cell->type.in(ID($tribuf), ID($_TBUF_)))
 					for (auto source : cell->getPort(ID::Y))
 						if (first_output_bits(source, outgoing).count(bit))
 							buffered = true;

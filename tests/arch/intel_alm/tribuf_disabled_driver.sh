@@ -65,7 +65,13 @@ for flatten in "" "-noflatten"; do
                         other_sources+=",d[1]"
                     fi
                     if [ "$shared" = 1 ]; then
-                        other_sources="$pad_sources"
+                        other_sources="z"
+                        if [ "$position" = 0 ]; then
+                            other_sources="d2"
+                        fi
+                        if [ "$width" = 2 ]; then
+                            other_sources+=",z"
+                        fi
                     fi
                     python3 "$WORK/check_pads.py" "$WORK/sweep.json" tribuf_ordinary_driver \
                         "pad=$pad_sources" "other_pad=$other_sources"
@@ -143,7 +149,7 @@ for flatten in "" "-noflatten"; do
             check -assert
         " > "$WORK/test.log" 2>&1 || { cat "$WORK/test.log"; exit 1; }
         python3 "$WORK/check_pads.py" "$WORK/mixed.json" mixed_disabled \
-            'pad=d2,d[1],z,d[3]' 'other_pad=d2,d[1],z,d[3]'
+            'pad=d2,d[1],z,d[3]' 'other_pad=z,d[1],z,d[3]'
     done
 done
 
