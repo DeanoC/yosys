@@ -32,3 +32,79 @@ cd top # Constrain all select calls below inside the top module
 
 select -assert-count 1 t:MISTRAL_MUL27X27
 select -assert-none t:MISTRAL_MUL27X27 %% t:* %D
+
+# Signedness must reach the MISTRAL_MUL cells. The Cyclone V DSP has no width
+# headroom, so a full-width unsigned operand needs the block's unsigned mode and
+# a product mul2dsp splits has unsigned low slices. dsp_sim.v defaults to
+# signed, matching nextpnr-mistral, so dropping the parameters fails here.
+design -reset
+read_verilog <<EOT
+module top(input [8:0] x, input [8:0] y, output [17:0] A); assign A = x * y; endmodule
+EOT
+hierarchy -top top
+proc
+equiv_opt -assert -map +/intel_alm/common/dsp_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf # equivalency check
+design -load postopt # load the post-opt design (otherwise equiv_opt loads the pre-opt design)
+cd top # Constrain all select calls below inside the top module
+
+select -assert-count 1 t:MISTRAL_MUL9X9
+select -assert-count 1 t:MISTRAL_MUL9X9 r:A_SIGNED=0 %i
+select -assert-count 1 t:MISTRAL_MUL9X9 r:B_SIGNED=0 %i
+
+design -reset
+read_verilog <<EOT
+module top(input signed [8:0] x, input signed [8:0] y, output signed [17:0] A); assign A = x * y; endmodule
+EOT
+hierarchy -top top
+proc
+equiv_opt -assert -map +/intel_alm/common/dsp_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf # equivalency check
+design -load postopt # load the post-opt design (otherwise equiv_opt loads the pre-opt design)
+cd top # Constrain all select calls below inside the top module
+
+select -assert-count 1 t:MISTRAL_MUL9X9
+select -assert-count 1 t:MISTRAL_MUL9X9 r:A_SIGNED=1 %i
+select -assert-count 1 t:MISTRAL_MUL9X9 r:B_SIGNED=1 %i
+
+design -reset
+read_verilog <<EOT
+module top(input [17:0] x, input [17:0] y, output [35:0] A); assign A = x * y; endmodule
+EOT
+hierarchy -top top
+proc
+equiv_opt -assert -map +/intel_alm/common/dsp_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf # equivalency check
+design -load postopt # load the post-opt design (otherwise equiv_opt loads the pre-opt design)
+cd top # Constrain all select calls below inside the top module
+
+select -assert-count 1 t:MISTRAL_MUL18X18
+select -assert-count 1 t:MISTRAL_MUL18X18 r:A_SIGNED=0 %i
+select -assert-count 1 t:MISTRAL_MUL18X18 r:B_SIGNED=0 %i
+
+design -reset
+read_verilog <<EOT
+module top(input [26:0] x, input [26:0] y, output [53:0] A); assign A = x * y; endmodule
+EOT
+hierarchy -top top
+proc
+equiv_opt -assert -map +/intel_alm/common/dsp_sim.v synth_intel_alm -family cyclonev -noiopad -noclkbuf # equivalency check
+design -load postopt # load the post-opt design (otherwise equiv_opt loads the pre-opt design)
+cd top # Constrain all select calls below inside the top module
+
+select -assert-count 1 t:MISTRAL_MUL27X27
+select -assert-count 1 t:MISTRAL_MUL27X27 r:A_SIGNED=0 %i
+select -assert-count 1 t:MISTRAL_MUL27X27 r:B_SIGNED=0 %i
+
+# A wide signed product is split into an unsigned low slice and a signed top
+# slice; each cell carries its own operand signedness. The single-cell cases
+# above prove the mapping, so only the parameters are checked here.
+design -reset
+read_verilog <<EOT
+module top(input signed [27:0] x, input signed [3:0] y, output signed [31:0] A); assign A = x * y; endmodule
+EOT
+hierarchy -top top
+proc
+synth_intel_alm -family cyclonev -noiopad -noclkbuf
+cd top # Constrain all select calls below inside the top module
+
+select -assert-count 1 t:MISTRAL_MUL27X27
+select -assert-count 1 t:MISTRAL_MUL27X27 r:A_SIGNED=0 %i
+select -assert-count 1 t:MISTRAL_MUL27X27 r:B_SIGNED=1 %i
