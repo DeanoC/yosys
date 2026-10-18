@@ -94,8 +94,8 @@ select -assert-count 1 t:MISTRAL_MUL27X27 r:A_SIGNED=0 %i
 select -assert-count 1 t:MISTRAL_MUL27X27 r:B_SIGNED=0 %i
 
 # A wide signed product is split into an unsigned low slice and a signed top
-# slice; each cell carries its own operand signedness. The single-cell cases
-# above prove the mapping, so only the parameters are checked here.
+# slice; each cell carries its own operand signedness. This checks those cell
+# parameters; full split-product equivalence is tracked in issue #26.
 design -reset
 read_verilog <<EOT
 module top(input signed [27:0] x, input signed [3:0] y, output signed [31:0] A); assign A = x * y; endmodule
