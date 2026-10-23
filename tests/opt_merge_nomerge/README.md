@@ -6,9 +6,9 @@ false attributes retain existing behavior. This is narrower than `keep`:
 unused marked cells can still be removed. It is not a placement lock or timing
 exception, and does not disable constant-state simplification.
 
-The attribute is interned once before worker execution, and its owning IdString
-lives with the worker. Constructing an IdString in the worker loop is forbidden
-by Yosys threading rules.
+The attribute name is looked up once on the design twine pool before workers
+start. Worker threads must not intern twines. A missing name means no cell
+carries the attribute.
 
 `run.py YOSYS OUTPUT --share SHARE` tests 22 cases through proc/opt_merge and the
 actual Intel ALM flow: absent/false/one/both marked, init0/init1, clock and logical
