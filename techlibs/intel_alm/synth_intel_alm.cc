@@ -291,7 +291,7 @@ pool<RTLIL::SigBit> split_shared_tristate_outputs(RTLIL::Design *design)
 						(bit != output && bit.wire != nullptr && bit.wire->port_output))
 					log_error("Cannot map tri-state output %s.%s: alias %s has a non-tri-state driver. "
 							"Use explicitly enabled tri-state drivers instead.\n",
-							log_id(module), log_signal(output), log_signal(bit));
+							module, log_signal(output), log_signal(bit));
 				if (incoming.count(bit))
 					for (auto source : incoming.at(bit)) {
 						// A Z assignment adds no driver. Leaving it as an
@@ -440,13 +440,14 @@ std::vector<PromotedTristateOutput> promote_read_tristate_outputs(RTLIL::Design 
 
 void restore_promoted_tristate_outputs(const std::vector<PromotedTristateOutput> &promoted)
 {
-	RTLIL::IdString io_type = RTLIL::escape_id("MISTRAL_IO");
-	RTLIL::IdString pad_port = RTLIL::escape_id("PAD");
-	RTLIL::IdString read_port = RTLIL::escape_id("O");
 	for (const auto &item : promoted) {
+		TwinePool &names = item.module->twines();
+		RTLIL::IdString io_type = names.add("\\MISTRAL_IO");
+		RTLIL::IdString pad_port = names.add("\\PAD");
+		RTLIL::IdString read_port = ID(O);
 		RTLIL::Wire *port = item.module->wire(item.name);
 		if (port == nullptr || !port->port_output)
-			log_error("tri-state output %s disappeared during pad mapping\n", log_id(item.name));
+			log_error("tri-state output %s disappeared during pad mapping\n", names.str(item.name));
 		port->port_input = false;
 		SigMap aliases(item.module);
 		pool<RTLIL::SigBit> expected;
@@ -465,10 +466,10 @@ void restore_promoted_tristate_outputs(const std::vector<PromotedTristateOutput>
 			mapped = true;
 			if (!cell->hasPort(read_port) || GetSize(cell->getPort(read_port)) == 0)
 				log_error("tri-state output %s is read, but its MISTRAL_IO has no O read-back\n",
-						log_id(item.name));
+						names.str(item.name));
 		}
 		if (!mapped)
-			log_error("tri-state output %s was not mapped to MISTRAL_IO\n", log_id(item.name));
+			log_error("tri-state output %s was not mapped to MISTRAL_IO\n", names.str(item.name));
 		item.module->fixup_ports();
 	}
 }
@@ -530,6 +531,25 @@ void buffer_promoted_output_drivers(RTLIL::Design *design,
 
 struct SynthIntelALMPass : public ScriptPass {
 	SynthIntelALMPass() : ScriptPass("synth_intel_alm", "synthesis for ALM-based Intel (Altera) FPGAs.") {}
+
+	void on_register() override
+	{
+		target_register.emplace("intel_alm", Target{
+			"Intel (Altera) ALM-based",
+			{
+				{"cyclonev", {
+					"Cyclone V",
+					{ "+/intel_alm/cyclonev/cells_sim.v",
+					  "+/intel_alm/common/alm_sim.v",
+					  "+/intel_alm/common/dff_sim.v",
+					  "+/intel_alm/common/dsp_sim.v",
+					  "+/intel_alm/common/mem_sim.v",
+					  "+/intel_alm/common/misc_sim.v",
+					}
+				}}
+			}
+		});
+	}
 
 	void help() override
 	{
@@ -690,7 +710,9 @@ struct SynthIntelALMPass : public ScriptPass {
 			pool<RTLIL::SigBit> inactive_outputs;
 			// Preserve directed driver paths until pad analysis. The default
 			// proc opt_expr can replace cell outputs by a contending constant.
-			run(noiopad ? "proc" : "proc -noopt");
+			// -latches error matches the other synth_* flows: this script does
+			// not map latches.
+			run(noiopad ? "proc -latches error" : "proc -noopt -latches error");
 			if (flatten || help_mode) {
 				run("check");
 				run("flatten", "(skip if -noflatten)");
@@ -799,7 +821,7 @@ struct SynthIntelALMPass : public ScriptPass {
 					for (int i = 0; i < read_clocks.size(); i++)
 						if (read_clocks[i] != State::S1)
 							log_error("Cyclone V M10K cannot implement an asynchronous read port in memory %s.%s; use MLAB, logic, or register the read address.\n",
-									log_id(module), log_id(cell));
+									module, cell);
 				}
 				run("memory_libmap -lib +/intel_alm/common/bram_m10k_aclr.txt -lib +/intel_alm/common/bram_m10k_sync.txt a:ramstyle=M10K");
 				run("techmap -map +/intel_alm/common/bram_m10k_aclr_map.v -map +/intel_alm/common/bram_m10k_sync_map.v");
@@ -832,6 +854,7 @@ struct SynthIntelALMPass : public ScriptPass {
 		}
 
 		if (check_label("map_ffs")) {
+			run("check -latchonly -assert");
 			run("techmap");
 			run("dfflegalize -cell $_DFFE_PN0P_ 0 -cell $_SDFFCE_PP0P_ 0");
 			run("techmap -map +/intel_alm/common/dff_map.v");

@@ -549,9 +549,11 @@ struct VerilogFrontend : public Frontend {
 
 		for (auto &child : parse_state.current_ast->children) {
 			if (child->type == AST::AST_MODULE)
-				for (auto &attr : attributes)
-					if (child->attributes.count(attr) == 0)
-						child->attributes[attr] = AST::AstNode::mkconst_int(top_loc, 1, false);
+				for (auto &attr : attributes) {
+					IdString attr_id = AST::intern_attr_name(attr);
+					if (child->attributes.count(attr_id) == 0)
+						child->attributes[attr_id] = AST::AstNode::mkconst_int(top_loc, 1, false);
+				}
 		}
 
 		if (flag_nodpi)
@@ -711,7 +713,7 @@ static void parse_file_list(const std::string &file_list_path, RTLIL::Design *de
 {
 	std::ifstream flist(file_list_path);
 	if (!flist.is_open()) {
-		log_error("Verilog file list file does not exist");
+		log_error("Verilog file list file does not exist\n");
 		exit(1);
 	}
 
