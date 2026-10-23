@@ -398,7 +398,10 @@ struct Abc9Pass : public ScriptPass
 				if (help_mode) run("select =*");
 				else active_design->push_complete_selection();
 				run("techmap -wb -map %$abc9 -map +/techmap.v");
-				if (xaiger == 1)
+				// write_xaiger embeds this holes design, so an isolated cone needs
+				// it mapped to an AIG. write_xaiger2 ignores $abc9_holes. -dff
+				// forces xaiger 1 and turns isolation off.
+				if (xaiger == 1 || isolate)
 					run("aigmap");
 				run("opt -purge");
 				run("design -stash $abc9_holes");
@@ -610,6 +613,19 @@ bool Abc9Pass::abc9_try_isolate(RTLIL::Module *mod)
 		return false;
 
 	SigMap sigmap(mod);
+	// Buf-normalized modules keep aliases in $buf/$connect and leave
+	// connections() empty. SigMap does not follow those cells, so a buffer
+	// would split one cone and ABC could not pack across it.
+	for (auto cell : mod->cells()) {
+		if (cell->has_keep_attr())
+			continue;
+		if (!cell->type.in(ID($buf), ID($_BUF_), ID($connect)))
+			continue;
+		RTLIL::SigSpec a = cell->getPort(ID::A);
+		RTLIL::SigSpec b = cell->getPort(cell->type == ID($connect) ? ID::B : ID::Y);
+		if (GetSize(a) && GetSize(a) == GetSize(b))
+			sigmap.add(a, b);
+	}
 	for (auto wire : mod->wires())
 		if (wire->name.isPublic())
 			sigmap.add(wire);
@@ -658,6 +674,9 @@ bool Abc9Pass::abc9_try_isolate(RTLIL::Module *mod)
 	}
 	for (auto cell : mod->cells()) {
 		if (cone_set.count(cell))
+			continue;
+		// Aliased above. Treating one as a reader would cut the cone at the buffer.
+		if (!cell->has_keep_attr() && cell->type.in(ID($buf), ID($_BUF_), ID($connect)))
 			continue;
 		for (auto &conn : cell->connections()) {
 			bool is_in = cell->input(conn.first);
@@ -1043,11 +1062,13 @@ bool Abc9Pass::abc9_try_isolate(RTLIL::Module *mod)
 			if (stash == saved_designs.end() || !stash->second)
 				log_error("ABC9 isolate: module %s has abc9 boxes but no holes design.\n", mod);
 			holes_design = stash->second;
-			RTLIL::Module *parent_holes = holes_design->module(mod->name);
+			// The holes design has its own twine pool. Names copied at stash
+			// time keep their indices; names created for the cone do not.
+			RTLIL::Module *parent_holes = holes_design->module(holes_design->twines().find_from(mod->twines(), mod->name));
 			if (!parent_holes)
 				log_error("ABC9 isolate: module %s has abc9 boxes but no holes module.\n", mod);
 			holes = parent_holes->clone();
-			holes->name = cone.mod->name;
+			holes->name = holes_design->twines().copy_from(cone.mod->twines(), cone.mod->name);
 			holes_design->add(holes);
 
 			pool<RTLIL::Wire*> keep;
@@ -1062,10 +1083,11 @@ bool Abc9Pass::abc9_try_isolate(RTLIL::Module *mod)
 					if (!port || !port->port_output)
 						continue;
 					std::string port_un = names.unescaped_str(port_name);
-					RTLIL::IdString hname = names.add(stringf("$abc%s.%s", cell->name, port_un.c_str()));
+					std::string hstr = stringf("$abc%s.%s", cell->name, port_un.c_str());
+					RTLIL::IdString hname = holes->twines().add(hstr);
 					RTLIL::Wire *hw = holes->wire(hname);
 					if (!hw || !hw->port_output)
-						log_error("ABC9 isolate: holes wire %s for %s is missing.\n", names.str(hname), cell);
+						log_error("ABC9 isolate: holes wire %s for %s is missing.\n", hstr, cell);
 					keep.insert(hw);
 				}
 			}
