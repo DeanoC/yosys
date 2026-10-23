@@ -34,9 +34,16 @@ PRIVATE_NAMESPACE_BEGIN
 pool<RTLIL::Cell *> disabled_tristate_drivers(RTLIL::Module *module, RTLIL::Design *design)
 {
 	RTLIL::Design analysis;
-	auto copy = module->clone();
-	analysis.add(copy);
+	// Design::add retargets the module at the destination pool. A no-arg
+	// clone keeps source indices, so the next pass walks those indices in
+	// an empty pool.
+	auto copy = module->clone(&analysis);
 	CellTypes celltypes(design);
+	auto in_source = [&](RTLIL::IdString id) {
+		if (id.empty() || ID::is_static(id))
+			return id;
+		return module->twines().find_from(copy->twines(), id);
+	};
 	dict<RTLIL::SigBit, pool<RTLIL::SigBit>> incoming;
 	dict<RTLIL::SigBit, pool<RTLIL::Cell *>> drivers;
 	std::vector<std::pair<RTLIL::IdString, RTLIL::SigSpec>> enables;
@@ -46,7 +53,7 @@ pool<RTLIL::Cell *> disabled_tristate_drivers(RTLIL::Module *module, RTLIL::Desi
 			incoming[conn.first[i]].insert(conn.second[i]);
 	for (auto cell : copy->cells()) {
 		for (const auto &conn : cell->connections())
-			if (celltypes.cell_output(cell->type, conn.first))
+			if (celltypes.cell_output(in_source(cell->type), in_source(conn.first)))
 				for (auto bit : conn.second)
 					drivers[bit].insert(cell);
 		if (cell->type.in(ID($tribuf), ID($_TBUF_))) {
@@ -70,7 +77,7 @@ pool<RTLIL::Cell *> disabled_tristate_drivers(RTLIL::Module *module, RTLIL::Desi
 			for (auto cell : drivers.at(bit))
 				if (needed.insert(cell).second)
 					for (const auto &conn : cell->connections())
-						if (celltypes.cell_input(cell->type, conn.first))
+						if (celltypes.cell_input(in_source(cell->type), in_source(conn.first)))
 							for (auto source : conn.second)
 								pending.push_back(source);
 	}
@@ -89,13 +96,15 @@ pool<RTLIL::Cell *> disabled_tristate_drivers(RTLIL::Module *module, RTLIL::Desi
 	Pass::call(&analysis, "opt_expr -keepdc");
 	SigMap folded(copy);
 	pool<RTLIL::Cell *> disabled;
-	for (const auto &item : enables)
+	for (const auto &item : enables) {
+		RTLIL::Cell *cell = module->cell(in_source(item.first));
+		if (!cell)
+			log_error("Tri-state driver %s is missing from %s.\n", copy->twines().str(item.first), module);
 		if (folded(item.second).is_fully_zero())
-			disabled.insert(module->cell(item.first));
-		else if (folded(item.second) == RTLIL::State::S1) {
-			auto cell = module->cell(item.first);
+			disabled.insert(cell);
+		else if (folded(item.second) == RTLIL::State::S1)
 			cell->setPort(cell->type == ID($tribuf) ? ID::EN : ID::E, RTLIL::State::S1);
-		}
+	}
 	return disabled;
 }
 
