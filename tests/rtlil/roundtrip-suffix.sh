@@ -1,5 +1,6 @@
 set -euo pipefail
 
+# First dynamic twine index is STATIC_TWINE_END. STATE_INIT puts that at 1055.
 mkdir -p temp
 
 ${YOSYS} -p "read_rtlil suffix-twines.il; write_rtlil temp/suffix-twines-write.il"
