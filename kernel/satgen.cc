@@ -20,6 +20,7 @@
 #include "kernel/satgen.h"
 #include "kernel/ff.h"
 #include "kernel/yosys_common.h"
+#include <algorithm>
 
 USING_YOSYS_NAMESPACE
 
@@ -719,19 +720,85 @@ bool SatGen::importCell(RTLIL::Cell *cell, int timestep)
 		std::vector<int> a = importDefSigSpec(cell->getPort(ID::A), timestep);
 		std::vector<int> b = importDefSigSpec(cell->getPort(ID::B), timestep);
 		std::vector<int> y = importDefSigSpec(cell->getPort(ID::Y), timestep);
-		extendSignalWidth(a, b, y, cell);
 
-		std::vector<int> yy = model_undef ? ez->vec_var(y.size()) : y;
+		// Same rule as extendSignalWidth: sign-extend only when both operands
+		// are signed, otherwise zero-extend. The product is commutative either way.
+		bool both_signed = false;
+		if (cell->parameters.count(ID::A_SIGNED) > 0 && cell->parameters.count(ID::B_SIGNED) > 0)
+			both_signed = cell->parameters[ID::A_SIGNED].as_bool() && cell->parameters[ID::B_SIGNED].as_bool();
 
-		std::vector<int> tmp(a.size(), ez->CONST_FALSE);
-		for (int i = 0; i < int(a.size()); i++)
-		{
-			std::vector<int> shifted_a(a.size(), ez->CONST_FALSE);
-			for (int j = i; j < int(a.size()); j++)
-				shifted_a.at(j) = a.at(j-i);
-			tmp = ez->vec_ite(b.at(i), ez->vec_add(tmp, shifted_a), tmp);
-		}
-		ez->assume(ez->vec_eq(tmp, yy));
+		int width = std::max(std::max(GetSize(a), GetSize(b)), GetSize(y));
+		if (width == 0)
+			return true;
+
+		// Schoolbook rows are one conditional add per selector bit. A selector
+		// that has been sign-extended (or whose top bits are already copies of
+		// one literal) repeats that bit across the product, and a negative
+		// narrow operand then adds a full-width shifted value dozens of times.
+		// CDCL does not finish that encoding: the signed 28x4 MISTRAL_MUL split
+		// stays in sat, and the 54-bit dsp_sim model does the same. A run of
+		// identical top bits b[s..width) contributes b[s] * (2^width - 2^s),
+		// which is -b[s] * (A << s) modulo the product width, so the run is one
+		// subtraction. Put the operand with fewer rows on the selector side.
+		auto row_count = [&](const std::vector<int> &operand) {
+			auto at = [&](int i) {
+				if (i < GetSize(operand))
+					return operand[i];
+				if (both_signed && !operand.empty())
+					return operand.back();
+				return ez->CONST_FALSE;
+			};
+			int top_bit = at(width - 1);
+			int fold_from = width - 1;
+			while (fold_from > 0 && at(fold_from - 1) == top_bit)
+				fold_from--;
+			int rows = fold_from;
+			if (top_bit != ez->CONST_FALSE)
+				rows++;
+			return rows;
+		};
+		if (row_count(b) > row_count(a))
+			std::swap(a, b);
+
+		int ext = (both_signed && !a.empty()) ? a.back() : ez->CONST_FALSE;
+		while (GetSize(a) < width)
+			a.push_back(ext);
+
+		std::vector<int> yy = model_undef ? ez->vec_var(GetSize(y)) : y;
+		std::vector<int> acc(width, ez->CONST_FALSE);
+
+		auto add_shifted = [&](int bit, int shift, bool subtract) {
+			if (bit == ez->CONST_FALSE || shift >= width)
+				return;
+			std::vector<int> term(width, ez->CONST_FALSE);
+			for (int j = shift; j < width; j++)
+				term[j] = a[j - shift];
+			if (bit == ez->CONST_TRUE)
+				acc = subtract ? ez->vec_sub(acc, term) : ez->vec_add(acc, term);
+			else if (subtract)
+				acc = ez->vec_ite(bit, ez->vec_sub(acc, term), acc);
+			else
+				acc = ez->vec_ite(bit, ez->vec_add(acc, term), acc);
+		};
+
+		auto bit_at = [&](int i) {
+			if (i < GetSize(b))
+				return b[i];
+			if (both_signed && !b.empty())
+				return b.back();
+			return ez->CONST_FALSE;
+		};
+		int top_bit = bit_at(width - 1);
+		int fold_from = width - 1;
+		while (fold_from > 0 && bit_at(fold_from - 1) == top_bit)
+			fold_from--;
+		for (int i = 0; i < fold_from; i++)
+			add_shifted(bit_at(i), i, false);
+		if (top_bit != ez->CONST_FALSE)
+			add_shifted(top_bit, fold_from, true);
+
+		std::vector<int> prod(acc.begin(), acc.begin() + GetSize(y));
+		ez->assume(ez->vec_eq(prod, yy));
 
 		if (model_undef) {
 			log_assert(arith_undef_handled);

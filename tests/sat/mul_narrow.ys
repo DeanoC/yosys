@@ -1,0 +1,75 @@
+# Schoolbook reference for a narrow signed (and unsigned) multiply. The signed
+# case is the one whose sign-extended selector used to keep `sat` busy: each
+# repeated sign bit added another full-width row. Both port orders must match
+# the same shift-add network.
+
+read_verilog <<EOT
+module gold(input signed [5:0] x, input signed [3:0] y, output signed [9:0] Y);
+	assign Y = x * y;
+endmodule
+module gate(input signed [5:0] x, input signed [3:0] y, output signed [9:0] Y);
+	wire signed [9:0] xs = x;
+	wire signed [9:0] p0 = y[0] ? xs : 0;
+	wire signed [9:0] p1 = y[1] ? (xs <<< 1) : 0;
+	wire signed [9:0] p2 = y[2] ? (xs <<< 2) : 0;
+	wire signed [9:0] ps = y[3] ? (xs <<< 3) : 0;
+	assign Y = p0 + p1 + p2 - ps;
+endmodule
+EOT
+proc
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -prove-asserts -show-inputs miter
+design -reset
+
+read_verilog <<EOT
+module gold(input signed [5:0] x, input signed [3:0] y, output signed [9:0] Y);
+	assign Y = y * x;
+endmodule
+module gate(input signed [5:0] x, input signed [3:0] y, output signed [9:0] Y);
+	wire signed [9:0] xs = x;
+	wire signed [9:0] p0 = y[0] ? xs : 0;
+	wire signed [9:0] p1 = y[1] ? (xs <<< 1) : 0;
+	wire signed [9:0] p2 = y[2] ? (xs <<< 2) : 0;
+	wire signed [9:0] ps = y[3] ? (xs <<< 3) : 0;
+	assign Y = p0 + p1 + p2 - ps;
+endmodule
+EOT
+proc
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -prove-asserts -show-inputs miter
+design -reset
+
+read_verilog <<EOT
+module gold(input signed [27:0] x, input signed [3:0] y, output signed [31:0] Y);
+	assign Y = x * y;
+endmodule
+module gate(input signed [27:0] x, input signed [3:0] y, output signed [31:0] Y);
+	wire signed [31:0] xs = x;
+	wire signed [31:0] p0 = y[0] ? xs : 0;
+	wire signed [31:0] p1 = y[1] ? (xs <<< 1) : 0;
+	wire signed [31:0] p2 = y[2] ? (xs <<< 2) : 0;
+	wire signed [31:0] ps = y[3] ? (xs <<< 3) : 0;
+	assign Y = p0 + p1 + p2 - ps;
+endmodule
+EOT
+proc
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -prove-asserts -show-inputs miter
+design -reset
+
+read_verilog <<EOT
+module gold(input [27:0] x, input [3:0] y, output [31:0] Y);
+	assign Y = x * y;
+endmodule
+module gate(input [27:0] x, input [3:0] y, output [31:0] Y);
+	wire [31:0] xu = x;
+	wire [31:0] p0 = y[0] ? xu : 0;
+	wire [31:0] p1 = y[1] ? (xu << 1) : 0;
+	wire [31:0] p2 = y[2] ? (xu << 2) : 0;
+	wire [31:0] p3 = y[3] ? (xu << 3) : 0;
+	assign Y = p0 + p1 + p2 + p3;
+endmodule
+EOT
+proc
+miter -equiv -flatten -make_assert gold gate miter
+sat -verify -prove-asserts -show-inputs miter
