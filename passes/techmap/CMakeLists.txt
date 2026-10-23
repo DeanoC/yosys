@@ -1,3 +1,5 @@
+add_subdirectory(mcm)
+
 yosys_core(libparse
 	libparse.cc
 	libparse.h

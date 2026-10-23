@@ -97,11 +97,14 @@ struct ModuleIndex {
 
 		bool changed = false;
 		for (auto &[port_name, value] : instantiation->connections_) {
+			if (GetSize(value) == 0)
+				continue;
+
 			Wire *port = module->wire(port_name);
 			if (!port || (!port->port_input && !port->port_output) || port->width != value.size()) {
 				log_error("Port %s connected on instance %s not found in module %s"
 						  " or width is not matching\n",
-						  port_name.unescape(), instantiation, module);
+						  PooledName(module, port_name).unescape(), instantiation, module);
 			}
 
 			if (port->port_input && port->port_output) {
@@ -163,8 +166,9 @@ struct ModuleIndex {
 			SigSpec new_tie;
 
 			for (auto port_bit : class_) {
-				if (instantiation->connections_.count(port_bit.wire->name)) {
-					SigBit bit = instantiation->connections_.at(port_bit.wire->name)[port_bit.offset];
+				auto it = instantiation->connections_.find(port_bit.wire->name);
+				if (it != instantiation->connections_.end() && GetSize(it->second) != 0) {
+					SigBit bit = it->second[port_bit.offset];
 					if (parent.used.check(bit)) {
 						if (!new_tie.empty()) {
 							severed_port_bits.append(port_bit);
@@ -286,11 +290,14 @@ struct UsageData {
 		dict<SigBit, SigBit> inputs;
 
 		for (auto &[port_name, value] : instance->connections_) {
+			if (GetSize(value) == 0)
+				continue;
+
 			Wire *port = module->wire(port_name);
 			if (!port || (!port->port_input && !port->port_output) || port->width != value.size()) {
 				log_error("Port %s connected on instance %s not found in module %s"
 						  " or width is not matching\n",
-						  port_name.unescape(), instance, module);
+						  PooledName(module, port_name).unescape(), instance, module);
 			}
 
 			if (port->port_input && port->port_output) {
@@ -369,6 +376,7 @@ struct UsageData {
 			const_.replace(constant_inputs);
 			log("Substituting constant %s for input terminal '%s' in module '%s'\n",
 				log_signal(const_), log_signal(chunk), module);
+			did_something = true;
 		}
 
 		// Propagate tied-together inputs
@@ -398,6 +406,7 @@ struct UsageData {
 		if (applied_ties.size()) {
 			log("Replacing %zu input terminal bits with tie-togethers in module '%s'\n",
 					applied_ties.size(), module);
+			did_something = true;
 		}
 		return did_something;
 	}
