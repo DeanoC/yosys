@@ -91,6 +91,21 @@ Verilog Attributes and non-standard features
   Setting the ``keep`` attribute on a module has the same effect as setting it
   on all instances of the module.
 
+- The ``nomerge`` cell attribute, when true, excludes the cell from duplicate
+  matching by ``opt_merge``, both as a source and as a replacement. An absent
+  or false attribute leaves the default behavior unchanged. Unlike ``keep``,
+  this does not preserve an unused cell or prevent constant simplification.
+
+  For a register inferred from a process, attach the attribute to the process,
+  for example ``(* nomerge = 1 *) always @(posedge clk) q <= d;``. Process
+  attributes are propagated to the emitted flip-flop cells by ``proc``.
+  A signal declaration attribute alone is not a substitute for a cell attribute.
+
+  This is an ``opt_merge`` policy, not a general optimization barrier. Other
+  passes, including equivalent-state transformations in ``opt_dff -sat`` and
+  sequential ``abc9 -dff`` flows, have independent behavior. The attribute does
+  not establish placement, timing, or physical register separation guarantees.
+
 - The ``keep_hierarchy`` attribute on cells and modules keeps the `flatten`
   command from flattening the indicated cells and modules.
 

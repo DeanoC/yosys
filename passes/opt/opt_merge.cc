@@ -105,6 +105,7 @@ struct OptMergeThreadWorker
 	int workers;
 	bool mode_share_all;
 	bool mode_keepdc;
+	const RTLIL::OwningIdString nomerge_attr;
 
 	static Hasher hash_pmux_in(const SigSpec& sig_s, const SigSpec& sig_b, Hasher h)
 	{
@@ -268,7 +269,8 @@ struct OptMergeThreadWorker
 			const SigMap &assign_map, const CellTypes &ct, int workers,
 			bool mode_share_all, bool mode_keepdc) :
 		module(module), assign_map(assign_map), initvals(initvals), ct(ct),
-		workers(workers), mode_share_all(mode_share_all), mode_keepdc(mode_keepdc)
+		workers(workers), mode_share_all(mode_share_all), mode_keepdc(mode_keepdc),
+		nomerge_attr("\\nomerge")
 	{
 	}
 
@@ -278,6 +280,10 @@ struct OptMergeThreadWorker
 		for (int cell_index = cell_range.begin; cell_index < cell_range.end; ++cell_index) {
 			const RTLIL::Cell *cell = module->cell_at(cell_index);
 			if (!module->selected(cell))
+				continue;
+			// Preserve explicit cell identity without keep's unused-cell semantics.
+			// Excluding the cell here prevents either side of a duplicate merge.
+			if (cell->get_bool_attribute(nomerge_attr))
 				continue;
 			if (cell->type.in(ID($meminit), ID($meminit_v2), ID($mem), ID($mem_v2))) {
 				// Ignore those for performance: meminit can have an excessively large port,

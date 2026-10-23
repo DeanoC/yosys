@@ -1,0 +1,73 @@
+design -reset
+read_verilog -sv <<EOF
+module top(input clk,d, output reg a=1'b1, output reg b=1'b1);
+always @(posedge clk) a <= d;
+always @(posedge clk) b <= d;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 1 t:$dff
+design -reset
+read_verilog -sv <<EOF
+module top(input clk,d, output reg a=1'b1, output reg b=1'b1);
+(* nomerge=0 *) always @(posedge clk) a <= d;
+always @(posedge clk) b <= d;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 1 t:$dff
+design -reset
+read_verilog -sv <<EOF
+module top(input clk,d, output reg a=1'b1, output reg b=1'b1);
+(* nomerge=1 *) always @(posedge clk) a <= d;
+always @(posedge clk) b <= d;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 2 t:$dff
+design -reset
+read_verilog -sv <<EOF
+module top(input clk,d, output reg a=1'b1, output reg b=1'b1);
+always @(posedge clk) a <= d;
+(* nomerge=1 *) always @(posedge clk) b <= d;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 2 t:$dff
+design -reset
+read_verilog -sv <<EOF
+module top(input clk,d, output reg a=1'b1, output reg b=1'b1);
+(* nomerge=1 *) always @(posedge clk) a <= d;
+(* nomerge=1 *) always @(posedge clk) b <= d;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 2 t:$dff
+design -reset
+read_verilog -sv <<EOF
+module top(input clk,d, output reg a);
+reg unused;
+always @(posedge clk) a <= d;
+(* nomerge=1 *) always @(posedge clk) unused <= d;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 1 t:$dff
