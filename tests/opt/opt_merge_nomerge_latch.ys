@@ -124,6 +124,52 @@ select -assert-count 1 t:$dff
 select -assert-count 0 t:$dff a:nomerge %i
 select -assert-count 2 t:$dlatch a:nomerge %i
 
+# Private state feeding marked latches stays mergeable. Run the FF and latch
+# extraction passes separately to make the upstream registers visible first.
+design -reset
+read_verilog -sv <<EOF
+module top(input clk, en, d, output logic q0, q1);
+  logic page0, page1;
+  (* ff_process *) always @(posedge clk) page0 <= d;
+  (* ff_process *) always @(posedge clk) page1 <= d;
+  (* nomerge=1 *) always_latch if (en) q0 <= page0;
+  (* nomerge=1 *) always_latch if (en) q1 <= page1;
+endmodule
+EOF
+hierarchy -top top
+proc_clean
+proc_rmdead
+proc_prune
+proc_init
+proc_arst
+proc_rom
+proc_mux
+select -assert-count 2 p:* a:ff_process %i
+proc_dff p:* a:ff_process %i
+select -clear
+proc_dlatch -latches info
+proc_clean
+opt_merge
+opt_clean
+select -assert-count 1 t:$dff
+select -assert-count 0 t:$dff a:nomerge %i
+select -assert-count 2 t:$dlatch a:nomerge %i
+
+# Latch identity belongs to the latch cell; marking its output wire could
+# also protect other drivers that share an aliased output net.
+design -reset
+read_verilog -sv <<EOF
+module top(input en, d, output logic q0, q1);
+  (* nomerge=1 *) always_latch if (en) q0 <= d;
+  (* nomerge=1 *) always_latch if (en) q1 <= d;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+select -assert-count 0 w:q0 a:nomerge %i
+select -assert-count 0 w:q1 a:nomerge %i
+select -assert-count 2 t:$dlatch a:nomerge %i
+
 design -reset
 read_verilog -sv <<EOF
 module top(input en, d, output logic q0, q1);
