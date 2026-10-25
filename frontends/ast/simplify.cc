@@ -2351,6 +2351,12 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 		}
 	}
 	for (auto &attr : attributes) {
+		// A bare identifier assignment-pattern key can name a struct member or a
+		// parameter used as an unpacked-array index. Defer resolving it until the
+		// target type is known.
+		if (attr.first == pattern_index_attr() && attr.second->type == AST_IDENTIFIER &&
+				attributes.count(pattern_member_attr()))
+			continue;
 		while (attr.second->simplify(true, stage, -1, false))
 			did_something = true;
 	}
@@ -3877,21 +3883,25 @@ skip_dynamic_range_lvalue_expansion:;
 							continue;
 						auto key = child->attributes.find(pattern_index_attr());
 						log_assert(key != child->attributes.end() && key->second);
+						while (key->second->simplify(true, stage, -1, false))
+							{}
 						if (key->second->type != AST_CONSTANT)
 							child->input_error("Indexed assignment pattern key must be a constant expression\n");
-						int index = key->second->bitsAsConst().as_int();
+						auto index = key->second->bitsAsConst().try_as_int(key->second->is_signed);
+						if (!index)
+							child->input_error("Indexed assignment pattern key does not fit in a 32-bit array index\n");
 						int position = -1;
 						for (int i = 0; i < total_elements; i++) {
 							auto indices = array_indices_from_position(lhs_mem, {i});
-							if (indices[0] == index) {
+							if (indices[0] == *index) {
 								position = i;
 								break;
 							}
 						}
 						if (position < 0)
-							child->input_error("Indexed assignment pattern key %d is outside the array range\n", index);
+							child->input_error("Indexed assignment pattern key %d is outside the array range\n", *index);
 						if (keyed_pattern_elements[position])
-							child->input_error("Duplicate index %d in indexed assignment pattern\n", index);
+							child->input_error("Duplicate index %d in indexed assignment pattern\n", *index);
 						keyed_pattern_elements[position] = child.get();
 					}
 

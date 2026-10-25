@@ -3972,6 +3972,9 @@ assignment_pattern_item:
 		$$ = std::move($1);
 	} |
 	expr TOK_COL expr {
+		// A bare identifier can be a struct member name or an array index
+		// parameter. Keep its expression and member-name candidate until the
+		// assignment target type is known.
 		bool is_identifier = $1->type == AST_IDENTIFIER;
 		std::string identifier = $1->str;
 		$$ = std::move($3);

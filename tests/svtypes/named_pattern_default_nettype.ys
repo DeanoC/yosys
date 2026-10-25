@@ -1,0 +1,4 @@
+read_verilog -sv named_pattern_default_nettype.sv
+prep -top top
+async2sync
+sat -verify -prove-asserts
