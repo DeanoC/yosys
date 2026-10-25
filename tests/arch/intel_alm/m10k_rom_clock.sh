@@ -38,6 +38,10 @@ if mixed:
     assert int(ram["parameters"]["CFG_RD_DBITS"], 2) == 40, ram["parameters"]
 elif kind == "memory":
     assert int(ram["parameters"]["CFG_BYTE_ENABLE"], 2) == 1, ram["parameters"]
+elif kind == "byte_enable_zero_mask":
+    assert int(ram["parameters"]["CFG_BYTE_ENABLE"], 2) == 1, ram["parameters"]
+    assert int(ram["parameters"]["CFG_DBITS"], 2) == 20, ram["parameters"]
+    assert ram["connections"]["A1BE"] == ["0", "0"], ram
 print(f"PASS: {top} maps one registered ROM with CLK1 tied to CLK2")
 PY
 }
@@ -47,6 +51,9 @@ check_rom "$WORK/standard.json" m10k_rom_clock memory
 
 synth m10k_const1_clock "$WORK/const1.json"
 check_rom "$WORK/const1.json" m10k_const1_clock const1
+
+synth m10k_byte_enable_zero_mask_clock "$WORK/byte_enable_zero_mask.json"
+check_rom "$WORK/byte_enable_zero_mask.json" m10k_byte_enable_zero_mask_clock byte_enable_zero_mask
 
 synth m10k_mixed_primitive_clock "$WORK/mixed_primitive.json"
 check_rom "$WORK/mixed_primitive.json" m10k_mixed_primitive_clock mixed

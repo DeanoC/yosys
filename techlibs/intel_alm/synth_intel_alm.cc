@@ -570,6 +570,7 @@ void tie_m10k_rom_clock(RTLIL::Design *design)
 		RTLIL::IdString clk1_port = module->twines().add("\\CLK1");
 		RTLIL::IdString clk2_port = module->twines().add("\\CLK2");
 		RTLIL::IdString en_port = module->twines().add("\\A1EN");
+		RTLIL::IdString be_port = module->twines().add("\\A1BE");
 		pool<RTLIL::SigBit> driven;
 		for (auto cell : module->cells())
 			for (auto &conn : cell->connections())
@@ -590,21 +591,26 @@ void tie_m10k_rom_clock(RTLIL::Design *design)
 			if (!cell->hasPort(clk2_port) || clock_undriven(cell->getPort(clk2_port), driven))
 				log_error("M10K %s.%s has neither CLK1 nor CLK2; Cyclone V M10K cannot implement an asynchronous read.\n",
 						module, cell);
-			if (!cell->hasPort(en_port) || !cell->getPort(en_port).is_fully_const())
-				log_error("M10K %s.%s has no write clock, but its write enable is not constant.\n",
-						module, cell);
-			bool active_high = false;
-			if (cell->hasParam("\\CFG_MIXED_WIDTH") && cell->getParam("\\CFG_MIXED_WIDTH").as_bool())
-				active_high = true;
-			if (cell->hasParam("\\CFG_BYTE_ENABLE") && cell->getParam("\\CFG_BYTE_ENABLE").as_bool())
-				active_high = true;
-			if (cell->hasParam("\\CFG_DBITS") && cell->getParam("\\CFG_DBITS").as_int() == 40)
-				active_high = true;
-			RTLIL::State inactive = active_high ? RTLIL::State::S0 : RTLIL::State::S1;
-			for (auto bit : cell->getPort(en_port))
-				if (bit.data != inactive)
-					log_error("M10K %s.%s has no write clock, but its write enable is active.\n",
+			bool byte_enable_inactive = cell->hasParam("\\CFG_BYTE_ENABLE") &&
+					cell->getParam("\\CFG_BYTE_ENABLE").as_bool() && cell->hasPort(be_port) &&
+					cell->getPort(be_port).size() == 2 && cell->getPort(be_port).is_fully_zero();
+			if (!byte_enable_inactive) {
+				if (!cell->hasPort(en_port) || !cell->getPort(en_port).is_fully_const())
+					log_error("M10K %s.%s has no write clock, but its write enable is not constant.\n",
 							module, cell);
+				bool active_high = false;
+				if (cell->hasParam("\\CFG_MIXED_WIDTH") && cell->getParam("\\CFG_MIXED_WIDTH").as_bool())
+					active_high = true;
+				if (cell->hasParam("\\CFG_BYTE_ENABLE") && cell->getParam("\\CFG_BYTE_ENABLE").as_bool())
+					active_high = true;
+				if (cell->hasParam("\\CFG_DBITS") && cell->getParam("\\CFG_DBITS").as_int() == 40)
+					active_high = true;
+				RTLIL::State inactive = active_high ? RTLIL::State::S0 : RTLIL::State::S1;
+				for (auto bit : cell->getPort(en_port))
+					if (bit.data != inactive)
+						log_error("M10K %s.%s has no write clock, but its write enable is active.\n",
+								module, cell);
+			}
 			log("Connecting M10K %s.%s CLK1 to its read clock; the cell has no write clock.\n",
 					module, cell);
 			cell->setPort(clk1_port, cell->getPort(clk2_port));

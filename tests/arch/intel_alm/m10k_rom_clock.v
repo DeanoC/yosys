@@ -26,6 +26,19 @@ module m10k_const1_clock (
     );
 endmodule
 
+module m10k_byte_enable_zero_mask_clock (
+    input clk,
+    output [19:0] q
+);
+    MISTRAL_M10K #(
+        .CFG_ABITS(9), .CFG_DBITS(20), .CFG_BYTE_ENABLE(1), .CFG_DUAL_CLOCK(1)
+    ) ram (
+        .CLK1(1'b0), .CLK2(clk), .A1ADDR(9'b0), .A1DATA(20'b0),
+        .A1EN(1'b1), .A1BE(2'b0), .B1ADDR(9'b0), .B1DATA(q),
+        .B1EN(1'b1), .ACLR0(1'b0), .ACLR1(1'b0)
+    );
+endmodule
+
 module m10k_mixed_primitive_clock (
     input clk,
     output [39:0] q
