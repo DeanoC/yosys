@@ -1069,6 +1069,298 @@ public:
 	}
 };
 
+// Named assignment patterns ('{member: expr, default: expr}) carry these attributes
+// on each element. Positional patterns have neither.
+static RTLIL::IdString pattern_member_attr()
+{
+	return intern_attr_name("\\pattern_member");
+}
+
+static RTLIL::IdString pattern_default_attr()
+{
+	return intern_attr_name("\\pattern_default");
+}
+
+static RTLIL::IdString pattern_index_attr()
+{
+	return intern_attr_name("\\pattern_index");
+}
+
+static bool assignment_pattern_is_named(AstNode *pattern)
+{
+	if (pattern->type != AST_ASSIGN_PATTERN)
+		return false;
+	for (auto &child : pattern->children) {
+		if (child->attributes.count(pattern_member_attr()) || child->attributes.count(pattern_default_attr()))
+			return true;
+	}
+	return false;
+}
+
+static std::string pattern_member_name(AstNode *elem)
+{
+	auto it = elem->attributes.find(pattern_member_attr());
+	if (it == elem->attributes.end() || !it->second)
+		return {};
+	std::string raw = it->second->str;
+	if (raw.empty() && it->second->is_string)
+		raw = it->second->bitsAsConst().decode_string();
+	if (!raw.empty() && raw[0] == '\\')
+		raw = raw.substr(1);
+	return raw;
+}
+
+static std::string plain_member_name(const std::string &name)
+{
+	if (!name.empty() && name[0] == '\\')
+		return name.substr(1);
+	return name;
+}
+
+static int packed_member_width(AstNode *member)
+{
+	if (!member->range_valid || member->range_left < member->range_right)
+		member->input_error("Member '%s' in named assignment pattern has no packed width\n", member->str);
+	return member->range_left - member->range_right + 1;
+}
+
+static void collect_struct_members(AstNode *struct_node, std::vector<AstNode*> &members)
+{
+	for (auto &child : struct_node->children) {
+		if (child->type == AST_STRUCT_ITEM || child->type == AST_STRUCT || child->type == AST_UNION)
+			members.push_back(child.get());
+	}
+}
+
+static void collect_scope_members(const std::string &prefix, std::vector<AstNode*> &members)
+{
+	std::string dot = prefix + ".";
+	for (auto &kv : current_scope) {
+		if (kv.first.compare(0, dot.size(), dot) != 0)
+			continue;
+		if (kv.first.find('.', dot.size()) != std::string::npos)
+			continue;
+		AstNode *node = kv.second;
+		if (node->type == AST_STRUCT_ITEM || node->type == AST_STRUCT || node->type == AST_UNION)
+			members.push_back(node);
+	}
+}
+
+// Packed struct or union members of an assignment target. Typedef instances are
+// recovered from the wiretype attribute; anonymous structs from the member scope
+// entries created when the struct was packed.
+static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
+{
+	std::vector<AstNode*> members;
+	AstNode *wire = lhs->id2ast;
+	AstNode *stype = nullptr;
+	if (AstNode *member = lhs->get_struct_member()) {
+		if (member->type == AST_STRUCT || member->type == AST_UNION)
+			stype = member;
+	}
+	if (!stype && wire && (wire->type == AST_STRUCT || wire->type == AST_UNION))
+		stype = wire;
+	else if (!stype && wire) {
+		if (AstNode *member = wire->get_struct_member()) {
+			if (member->type == AST_STRUCT || member->type == AST_UNION)
+				stype = member;
+		}
+		if (!stype) {
+			auto it = wire->attributes.find(ID::wiretype);
+			if (it != wire->attributes.end() && it->second) {
+				std::string tname = it->second->str;
+				if (tname.empty() && it->second->is_string)
+					tname = it->second->bitsAsConst().decode_string();
+				if (!tname.empty() && tname[0] != '\\')
+					tname = "\\" + tname;
+				if (!tname.empty() && current_scope.count(tname)) {
+					AstNode *td = current_scope.at(tname);
+					if (td->type == AST_TYPEDEF && td->children.size() == 1 &&
+							(td->children[0]->type == AST_STRUCT || td->children[0]->type == AST_UNION))
+						stype = td->children[0].get();
+				}
+			}
+		}
+	}
+	if (stype && !stype->range_valid && (stype->type == AST_STRUCT || stype->type == AST_UNION))
+		size_packed_struct(stype, 0);
+	if (stype)
+		collect_struct_members(stype, members);
+	if (members.empty())
+		collect_scope_members(lhs->str, members);
+	return members;
+}
+
+static bool is_whole_struct_pattern_target(AstNode *lhs)
+{
+	if (lhs->type != AST_IDENTIFIER)
+		return false;
+	if (lhs->children.empty())
+		return true;
+
+	AstNode *member = lhs->get_struct_member();
+	if (!member || (member->type != AST_STRUCT && member->type != AST_UNION))
+		return false;
+
+	int width = -1;
+	bool sign = true;
+	lhs->detectSignWidth(width, sign);
+	return width == packed_member_width(member);
+}
+
+static std::unique_ptr<AstNode> cast_to_width(AstSrcLocType loc, int width, std::unique_ptr<AstNode> value)
+{
+	return std::make_unique<AstNode>(loc, AST_CAST_SIZE, AstNode::mkconst_int(loc, width, false), std::move(value));
+}
+
+static std::unique_ptr<AstNode> elaborate_named_pattern(AstNode *pattern, const std::vector<AstNode*> &members);
+static std::unique_ptr<AstNode> elaborate_positional_pattern(AstNode *pattern, const std::vector<AstNode*> &members);
+
+static std::unique_ptr<AstNode> pattern_element_value(AstNode *elem, AstNode *member)
+{
+	auto value = elem->clone();
+	value->attributes.erase(pattern_member_attr());
+	value->attributes.erase(pattern_default_attr());
+	value->attributes.erase(pattern_index_attr());
+	if (value->type == AST_ASSIGN_PATTERN) {
+		if (member->type != AST_STRUCT && member->type != AST_UNION)
+			elem->input_error("Assignment pattern member '%s' is not a struct or union\n", member->str);
+		std::vector<AstNode*> sub;
+		collect_struct_members(member, sub);
+		if (sub.empty())
+			elem->input_error("Assignment pattern member '%s' is not a struct or union\n", member->str);
+		if (assignment_pattern_is_named(value.get())) {
+			value = elaborate_named_pattern(value.get(), sub);
+		} else {
+			if (member->type != AST_STRUCT)
+				elem->input_error("Positional assignment pattern is not supported for packed union member '%s'\n", member->str);
+			value = elaborate_positional_pattern(value.get(), sub);
+		}
+	}
+	return value;
+}
+
+static std::unique_ptr<AstNode> elaborate_positional_pattern(AstNode *pattern, const std::vector<AstNode*> &members)
+{
+	if (members.empty())
+		pattern->input_error("Positional assignment pattern target is not a packed struct\n");
+	if (pattern->children.size() != members.size())
+		pattern->input_error("Positional assignment pattern element count mismatch: got %d, expected %d\n",
+				GetSize(pattern->children), GetSize(members));
+
+	std::vector<AstNode*> ordered = members;
+	std::sort(ordered.begin(), ordered.end(), [](AstNode *a, AstNode *b) {
+		if (a->range_right != b->range_right)
+			return a->range_right < b->range_right;
+		return a->str < b->str;
+	});
+
+	auto concat = std::make_unique<AstNode>(pattern->location, AST_CONCAT);
+	for (auto *member : ordered) {
+		auto it = std::find(members.begin(), members.end(), member);
+		log_assert(it != members.end());
+		auto index = std::distance(members.begin(), it);
+		concat->children.push_back(cast_to_width(pattern->location, packed_member_width(member),
+				pattern_element_value(pattern->children[index].get(), member)));
+	}
+	return concat;
+}
+
+// Build an LSB-first concatenation of the struct members. Union arms share an
+// offset, so a union pattern is a single value rather than a concatenation.
+static std::unique_ptr<AstNode> elaborate_named_pattern(AstNode *pattern, const std::vector<AstNode*> &members)
+{
+	if (members.empty())
+		pattern->input_error("Named assignment pattern target is not a packed struct or union\n");
+
+	std::map<std::string, AstNode*> by_name;
+	for (auto *member : members) {
+		std::string name = plain_member_name(member->str);
+		if (name.empty())
+			pattern->input_error("Named assignment pattern target has an unnamed member\n");
+		if (by_name.count(name))
+			pattern->input_error("Duplicate member '%s' in named assignment pattern target\n", name);
+		by_name[name] = member;
+	}
+
+	std::map<std::string, AstNode*> specified;
+	AstNode *default_elem = nullptr;
+	for (auto &child : pattern->children) {
+		bool is_default = child->attributes.count(pattern_default_attr()) != 0;
+		bool is_named = child->attributes.count(pattern_member_attr()) != 0;
+		if (is_default && !is_named) {
+			if (default_elem)
+				child->input_error("Named assignment pattern has multiple defaults\n");
+			default_elem = child.get();
+			continue;
+		}
+		if (!is_named)
+			child->input_error("Named assignment pattern mixes positional and named elements\n");
+		std::string name = pattern_member_name(child.get());
+		if (name.empty())
+			child->input_error("Named assignment pattern element is missing a member name\n");
+		if (!by_name.count(name))
+			child->input_error("Unknown member '%s' in named assignment pattern\n", name);
+		if (specified.count(name))
+			child->input_error("Duplicate member '%s' in named assignment pattern\n", name);
+		specified[name] = child.get();
+	}
+
+	bool overlay = members.size() > 1;
+	int shared_lsb = members[0]->range_right;
+	for (auto *member : members) {
+		if (member->range_right != shared_lsb)
+			overlay = false;
+	}
+
+	auto loc = pattern->location;
+	if (overlay) {
+		if (specified.size() > 1)
+			pattern->input_error("Named assignment pattern on a union must specify a single member\n");
+		AstNode *elem = nullptr;
+		AstNode *member = members[0];
+		if (specified.size() == 1) {
+			elem = specified.begin()->second;
+			member = by_name.at(specified.begin()->first);
+		} else if (default_elem) {
+			elem = default_elem;
+		} else {
+			pattern->input_error("Member '%s' missing from named assignment pattern\n", plain_member_name(member->str));
+		}
+		return cast_to_width(loc, packed_member_width(member), pattern_element_value(elem, member));
+	}
+
+	std::vector<AstNode*> ordered;
+	for (auto *member : members) {
+		auto it = ordered.begin();
+		while (it != ordered.end()) {
+			AstNode *have = *it;
+			if (have->range_right < member->range_right ||
+					(have->range_right == member->range_right && have->str < member->str)) {
+				++it;
+				continue;
+			}
+			break;
+		}
+		ordered.insert(it, member);
+	}
+
+	auto concat = std::make_unique<AstNode>(loc, AST_CONCAT);
+	for (auto *member : ordered) {
+		std::string name = plain_member_name(member->str);
+		AstNode *elem = nullptr;
+		auto found = specified.find(name);
+		if (found != specified.end())
+			elem = found->second;
+		else if (default_elem)
+			elem = default_elem;
+		else
+			pattern->input_error("Member '%s' missing from named assignment pattern\n", name);
+		concat->children.push_back(cast_to_width(loc, packed_member_width(member), pattern_element_value(elem, member)));
+	}
+	return concat;
+}
+
 // convert the AST into a simpler AST that has all parameters substituted by their
 // values, unrolled for-loops, expanded generate blocks, etc. when this function
 // is done with an AST it can be converted into RTLIL using genRTLIL().
@@ -1760,8 +2052,18 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 
 				case AST_STRUCT:
 				case AST_UNION: {
-					child->delete_children();
 					width = size_packed_struct(template_node, 0);
+					if (GetSize(children) > 1 && children[1]->type == AST_ASSIGN_PATTERN &&
+							assignment_pattern_is_named(children[1].get())) {
+						std::vector<AstNode*> members;
+						collect_struct_members(template_node, members);
+						if (members.empty())
+							children[1]->input_error("Named assignment pattern target is not a packed struct or union\n");
+						children[1] = elaborate_named_pattern(children[1].get(), members);
+						fixup_hierarchy_flags();
+						did_something = true;
+					}
+					child->delete_children();
 					node = mkconst_int(child->location, width, false);
 					break;
 				}
@@ -2049,6 +2351,12 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 		}
 	}
 	for (auto &attr : attributes) {
+		// A bare identifier assignment-pattern key can name a struct member or a
+		// parameter used as an unpacked-array index. Defer resolving it until the
+		// target type is known.
+		if (attr.first == pattern_index_attr() && attr.second->type == AST_IDENTIFIER &&
+				attributes.count(pattern_member_attr()))
+			continue;
 		while (attr.second->simplify(true, stage, -1, false))
 			did_something = true;
 	}
@@ -3387,6 +3695,23 @@ skip_dynamic_range_lvalue_expansion:;
 		}
 	}
 
+	// Named assignment pattern: '{member: expr, default: expr} -> concatenation in
+	// struct member order (LSB first). Positional patterns and array defaults stay on the
+	// unpacked-array path.
+	if ((type == AST_ASSIGN_EQ || type == AST_ASSIGN_LE || type == AST_ASSIGN) &&
+			GetSize(children) >= 2 && children[1]->type == AST_ASSIGN_PATTERN &&
+			assignment_pattern_is_named(children[1].get()) && !is_unexpanded_array_ref(children[0].get()))
+	{
+		if (!is_whole_struct_pattern_target(children[0].get()))
+			input_error("Named assignment pattern requires a whole struct or union target.\n");
+		auto members = members_for_lhs(children[0].get());
+		if (members.empty())
+			children[0]->input_error("Named assignment pattern target `%s' is not a packed struct or union\n", children[0]->str);
+		children[1] = elaborate_named_pattern(children[1].get(), members);
+		fixup_hierarchy_flags();
+		did_something = true;
+	}
+
 	// Expand array assignment: arr_out = arr_in OR arr_out = cond ? arr_a : arr_b OR arr_out = '{a, b}
 	// Supports multi-dimensional unpacked arrays
 	if ((type == AST_ASSIGN_EQ || type == AST_ASSIGN_LE || type == AST_ASSIGN) &&
@@ -3406,6 +3731,13 @@ skip_dynamic_range_lvalue_expansion:;
 
 		// Case 3: Positional assignment pattern (out = '{a, b})
 		bool is_pattern_assign = rhs->type == AST_ASSIGN_PATTERN;
+		bool pattern_is_default = is_pattern_assign && rhs->children.size() == 1 &&
+			rhs->children[0]->attributes.count(pattern_default_attr()) != 0 &&
+			rhs->children[0]->attributes.count(pattern_member_attr()) == 0;
+		bool pattern_has_index = false;
+		if (is_pattern_assign)
+			for (auto &child : rhs->children)
+				pattern_has_index |= child->attributes.count(pattern_index_attr()) != 0;
 
 		if (is_direct_assign || is_ternary_assign || is_pattern_assign)
 		{
@@ -3420,6 +3752,9 @@ skip_dynamic_range_lvalue_expansion:;
 			int element_width, mem_size, addr_bits;
 			lhs_mem->meminfo(element_width, mem_size, addr_bits);
 			bool pattern_is_flat = false;
+			bool pattern_is_keyed = false;
+			AstNode *pattern_default_element = nullptr;
+			std::vector<AstNode*> keyed_pattern_elements;
 
 			// Helper to add indices to an array identifier clone.
 			auto add_indices_to_id = [&](std::unique_ptr<AstNode> id, const std::vector<int>& indices) {
@@ -3472,9 +3807,25 @@ skip_dynamic_range_lvalue_expansion:;
 			};
 
 			// Select the assignment pattern element for an unpacked array position.
+			auto clone_pattern_value = [](AstNode *element) {
+				auto value = element->clone();
+				value->attributes.erase(pattern_member_attr());
+				value->attributes.erase(pattern_default_attr());
+				value->attributes.erase(pattern_index_attr());
+				return value;
+			};
 			auto pattern_element_at_position = [&](const std::vector<int>& position, int flat_index) {
+				if (pattern_is_default)
+					return clone_pattern_value(rhs->children[0].get());
 				if (pattern_is_flat)
-					return rhs->children[flat_index]->clone();
+					return clone_pattern_value(rhs->children[flat_index].get());
+				if (pattern_is_keyed) {
+					AstNode *element = keyed_pattern_elements[position[0]];
+					if (!element)
+						element = pattern_default_element;
+					log_assert(element != nullptr);
+					return clone_pattern_value(element);
+				}
 
 				AstNode *pattern = rhs;
 				for (int d = 0; d < num_dims; d++) {
@@ -3482,7 +3833,7 @@ skip_dynamic_range_lvalue_expansion:;
 					AstNode *element = pattern->children[position[d]].get();
 
 					if (d + 1 == num_dims)
-						return element->clone();
+						return clone_pattern_value(element);
 
 					if (element->type == AST_ASSIGN_PATTERN) {
 						pattern = element;
@@ -3506,7 +3857,58 @@ skip_dynamic_range_lvalue_expansion:;
 				    !arrays_have_compatible_dims(lhs_mem, false_mem))
 					input_error("Array dimension mismatch in ternary expression\n");
 			} else {
-				if (num_dims > 1 && GetSize(rhs->children) == lhs_mem->dimensions[0].range_width) {
+				if (pattern_is_default) {
+					// A default assignment pattern supplies the same value to every element.
+				} else if (pattern_has_index) {
+					if (num_dims != 1)
+						input_error("Indexed assignment patterns for unpacked arrays currently require one dimension\n");
+
+					pattern_is_keyed = true;
+					keyed_pattern_elements.resize(total_elements);
+					bool has_positional_element = false;
+					for (auto &child : rhs->children) {
+						if (child->attributes.count(pattern_default_attr())) {
+							if (pattern_default_element)
+								child->input_error("Indexed assignment pattern has multiple defaults\n");
+							pattern_default_element = child.get();
+						} else if (child->attributes.count(pattern_index_attr()) == 0) {
+							has_positional_element = true;
+						}
+					}
+					if (has_positional_element)
+						input_error("Assignment pattern mixes positional and indexed elements\n");
+
+					for (auto &child : rhs->children) {
+						if (child->attributes.count(pattern_default_attr()))
+							continue;
+						auto key = child->attributes.find(pattern_index_attr());
+						log_assert(key != child->attributes.end() && key->second);
+						while (key->second->simplify(true, stage, -1, false))
+							{}
+						if (key->second->type != AST_CONSTANT)
+							child->input_error("Indexed assignment pattern key must be a constant expression\n");
+						auto index = key->second->bitsAsConst().try_as_int(key->second->is_signed);
+						if (!index)
+							child->input_error("Indexed assignment pattern key does not fit in a 32-bit array index\n");
+						int position = -1;
+						for (int i = 0; i < total_elements; i++) {
+							auto indices = array_indices_from_position(lhs_mem, {i});
+							if (indices[0] == *index) {
+								position = i;
+								break;
+							}
+						}
+						if (position < 0)
+							child->input_error("Indexed assignment pattern key %d is outside the array range\n", *index);
+						if (keyed_pattern_elements[position])
+							child->input_error("Duplicate index %d in indexed assignment pattern\n", *index);
+						keyed_pattern_elements[position] = child.get();
+					}
+
+					for (auto *element : keyed_pattern_elements)
+						if (!element && !pattern_default_element)
+							input_error("Indexed assignment pattern does not specify every array element\n");
+				} else if (num_dims > 1 && GetSize(rhs->children) == lhs_mem->dimensions[0].range_width) {
 					validate_pattern_shape(rhs, 0);
 				} else if (num_dims == 1 && GetSize(rhs->children) == total_elements) {
 					pattern_is_flat = true;
@@ -4905,9 +5307,21 @@ apply_newNode:
 		// dumpAst(stderr, "- ");
 		// newNode->dumpAst(stderr, "+ ");
 		log_assert(newNode != nullptr);
+		auto member_tag = attributes.find(pattern_member_attr());
+		auto default_tag = attributes.find(pattern_default_attr());
+		auto index_tag = attributes.find(pattern_index_attr());
+		auto saved_member_tag = member_tag == attributes.end() ? nullptr : member_tag->second->clone();
+		auto saved_default_tag = default_tag == attributes.end() ? nullptr : default_tag->second->clone();
+		auto saved_index_tag = index_tag == attributes.end() ? nullptr : index_tag->second->clone();
 		newNode->location.begin.filename = location.begin.filename;
 		newNode->location = location;
 		newNode->cloneInto(*this);
+		if (saved_member_tag && !attributes.count(pattern_member_attr()))
+			attributes[pattern_member_attr()] = std::move(saved_member_tag);
+		if (saved_default_tag && !attributes.count(pattern_default_attr()))
+			attributes[pattern_default_attr()] = std::move(saved_default_tag);
+		if (saved_index_tag && !attributes.count(pattern_index_attr()))
+			attributes[pattern_index_attr()] = std::move(saved_index_tag);
 		fixup_hierarchy_flags();
 		did_something = true;
 	}

@@ -1,0 +1,4 @@
+read_verilog -sv named_pattern_typed_cast.sv
+prep -top named_pattern_typed_cast
+async2sync
+sat -verify -prove-asserts
