@@ -1,0 +1,4 @@
+read_verilog -sv named_pattern_positional_nested.sv
+prep -top named_pattern_positional_nested
+async2sync
+sat -verify -prove-asserts

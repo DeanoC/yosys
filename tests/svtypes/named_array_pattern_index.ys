@@ -1,0 +1,5 @@
+read_verilog -sv named_array_pattern_index.sv
+prep -top named_array_pattern_index
+memory_map
+async2sync
+sat -verify -prove-asserts

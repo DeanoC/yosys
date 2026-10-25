@@ -1,0 +1,5 @@
+read_verilog -sv array_pattern_default.sv
+prep -top array_pattern_default
+memory_map
+async2sync
+sat -verify -prove-asserts

@@ -5,6 +5,8 @@ module top(
 	input logic [19:0] in,
 	input logic [1:0] i,
 	input logic [1:0] j,
+	input logic [2:0] member_j,
+	input logic [1:0] multidim_j,
 	output logic y_const,
 	output logic [3:0] z_gen,
 	output logic y_var,
@@ -26,6 +28,16 @@ module top(
 	end
 	assign y_var = arr[i].a;
 	assign y_dynamic_bit = arr[i].b[j];
+	logic dynamic_member_bit;
+	assign dynamic_member_bit = arr[0].b[member_j];
+	s_t [1:0] dynamic_write;
+
+	typedef struct packed { logic a; logic [1:0][3:0] b; } multidim_s_t;
+	multidim_s_t [1:0] multidim_arr;
+	logic [3:0] multidim_dynamic_select;
+	localparam integer multidim_dynamic_bits = $bits(multidim_arr[0].b[multidim_j]);
+	assign multidim_arr = 18'h187a5;
+	assign multidim_dynamic_select = multidim_arr[0].b[multidim_j];
 
 	s_t [1:0] cls;
 	for (genvar k = 0; k < 2; k++) begin : h
@@ -71,6 +83,16 @@ module top(
 	always_comb assert(z_gen == in[8:5]);
 	always_comb assert(y_var == in[(i * 5) + 4]);
 	always_comb assert(y_dynamic_bit == in[(i * 5) + j]);
+	always_comb assert(member_j < 4 ? dynamic_member_bit == in[member_j] : dynamic_member_bit === 1'bx);
+	always_comb assert(multidim_dynamic_bits == 4);
+	always_comb assert(multidim_j == 0 ? multidim_dynamic_select == 4'h5 :
+		multidim_j == 1 ? multidim_dynamic_select == 4'ha : multidim_dynamic_select === 4'bxxxx);
+	always_comb begin
+		dynamic_write = '0;
+		dynamic_write[0].b[member_j] = 1'b1;
+		assert(dynamic_write[0].a == 1'b0);
+		assert(member_j < 4 ? dynamic_write[0].b == (4'b0001 << member_j) : dynamic_write[0].b == 4'b0000);
+	end
 	always_comb assert(z_lhs0 == in[3:0]);
 	always_comb assert(z_lhs1 == in[7:4]);
 	always_comb assert(member_bits == 4);
