@@ -13,6 +13,8 @@ Yosys 0.70 .. Yosys 0.71-dev
  * Various
     - intel_alm: Infer initialized MLABs and dual-clock, byte-enable,
       mixed-width, and true dual-port M10K RAM; keep Cyclone V HPS I2C.
+    - intel_alm: Connect M10K CLK1 to the read clock when a ROM has no
+      write clock. nextpnr-mistral rejects an unconnected CLK1.
 
 Yosys 0.69 .. Yosys 0.70
 --------------------------

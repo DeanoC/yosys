@@ -1,0 +1,4 @@
+read_verilog -sv imported_type_net_decl.sv
+prep -top top -flatten
+async2sync
+sat -verify -prove-asserts
