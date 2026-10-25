@@ -5951,7 +5951,7 @@ bool AstNode::replace_variables(std::map<std::string, AstNode::varinfo_t> &varia
 			}
 			offset = min(children.at(0)->range_left, children.at(0)->range_right);
 			selected_offset = offset;
-			width = min(std::abs(children.at(0)->range_left - children.at(0)->range_right) + 1, width);
+			width = std::abs(children.at(0)->range_left - children.at(0)->range_right) + 1;
 			// make_index_range() is relative to the member. genRTLIL adds the
 			// member's base offset; constant evaluation has to do the same.
 			if (AstNode *member = get_struct_member()) {
@@ -5968,10 +5968,12 @@ bool AstNode::replace_variables(std::map<std::string, AstNode::varinfo_t> &varia
 		new_bits.reserve(width);
 		for (int i = 0; i < width; i++) {
 			int member_index = selected_offset + i;
-			if (member_width >= 0 && (member_index < 0 || member_index >= member_width))
+			int value_index = offset + i;
+			if ((member_width >= 0 && (member_index < 0 || member_index >= member_width)) ||
+					value_index < 0 || value_index >= GetSize(val))
 				new_bits.push_back(RTLIL::State::Sx);
 			else
-				new_bits.push_back(val[offset+i]);
+				new_bits.push_back(val[value_index]);
 		}
 		auto newNode = mkconst_bits(location, new_bits, variables.at(str).is_signed);
 		newNode->cloneInto(*this);
@@ -6126,7 +6128,7 @@ std::unique_ptr<AstNode> AstNode::eval_const_function(AstNode *fcall, bool must_
 				}
 				int width = std::abs(range->range_left - range->range_right) + 1;
 				varinfo_t &v = variables[stmt->children.at(0)->str];
-				RTLIL::Const r = stmt->children.at(1)->bitsAsConst(v.val.size());
+				RTLIL::Const r = stmt->children.at(1)->bitsAsConst(width);
 				for (int i = 0; i < width; i++) {
 					int member_index = selected_offset + i;
 					if (member_width >= 0 && (member_index < 0 || member_index >= member_width))
@@ -6134,6 +6136,8 @@ std::unique_ptr<AstNode> AstNode::eval_const_function(AstNode *fcall, bool must_
 					int index = i + offset - v.offset;
 					if (v.range_swapped)
 						index = -index;
+					if (index < 0 || index >= GetSize(v.val))
+						continue;
 					v.val.set(index, r.at(i));
 				}
 			}
