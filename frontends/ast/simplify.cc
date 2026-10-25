@@ -1149,9 +1149,13 @@ static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
 	std::vector<AstNode*> members;
 	AstNode *wire = lhs->id2ast;
 	AstNode *stype = nullptr;
-	if (wire && (wire->type == AST_STRUCT || wire->type == AST_UNION))
+	if (AstNode *member = lhs->get_struct_member()) {
+		if (member->type == AST_STRUCT || member->type == AST_UNION)
+			stype = member;
+	}
+	if (!stype && wire && (wire->type == AST_STRUCT || wire->type == AST_UNION))
 		stype = wire;
-	else if (wire) {
+	else if (!stype && wire) {
 		if (AstNode *member = wire->get_struct_member()) {
 			if (member->type == AST_STRUCT || member->type == AST_UNION)
 				stype = member;
@@ -1182,12 +1186,30 @@ static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
 	return members;
 }
 
+static bool is_whole_struct_pattern_target(AstNode *lhs)
+{
+	if (lhs->type != AST_IDENTIFIER)
+		return false;
+	if (lhs->children.empty())
+		return true;
+
+	AstNode *member = lhs->get_struct_member();
+	if (!member || (member->type != AST_STRUCT && member->type != AST_UNION))
+		return false;
+
+	int width = -1;
+	bool sign = true;
+	lhs->detectSignWidth(width, sign);
+	return width == packed_member_width(member);
+}
+
 static std::unique_ptr<AstNode> cast_to_width(AstSrcLocType loc, int width, std::unique_ptr<AstNode> value)
 {
 	return std::make_unique<AstNode>(loc, AST_CAST_SIZE, AstNode::mkconst_int(loc, width, false), std::move(value));
 }
 
 static std::unique_ptr<AstNode> elaborate_named_pattern(AstNode *pattern, const std::vector<AstNode*> &members);
+static std::unique_ptr<AstNode> elaborate_positional_pattern(AstNode *pattern, const std::vector<AstNode*> &members);
 
 static std::unique_ptr<AstNode> pattern_element_value(AstNode *elem, AstNode *member)
 {
@@ -1195,17 +1217,47 @@ static std::unique_ptr<AstNode> pattern_element_value(AstNode *elem, AstNode *me
 	value->attributes.erase(pattern_member_attr());
 	value->attributes.erase(pattern_default_attr());
 	if (value->type == AST_ASSIGN_PATTERN) {
-		if (!assignment_pattern_is_named(value.get()))
-			elem->input_error("Positional assignment pattern is not supported for packed struct member '%s'\n", member->str);
 		if (member->type != AST_STRUCT && member->type != AST_UNION)
-			elem->input_error("Named assignment pattern member '%s' is not a struct or union\n", member->str);
+			elem->input_error("Assignment pattern member '%s' is not a struct or union\n", member->str);
 		std::vector<AstNode*> sub;
 		collect_struct_members(member, sub);
 		if (sub.empty())
-			elem->input_error("Named assignment pattern member '%s' is not a struct or union\n", member->str);
-		value = elaborate_named_pattern(value.get(), sub);
+			elem->input_error("Assignment pattern member '%s' is not a struct or union\n", member->str);
+		if (assignment_pattern_is_named(value.get())) {
+			value = elaborate_named_pattern(value.get(), sub);
+		} else {
+			if (member->type != AST_STRUCT)
+				elem->input_error("Positional assignment pattern is not supported for packed union member '%s'\n", member->str);
+			value = elaborate_positional_pattern(value.get(), sub);
+		}
 	}
 	return value;
+}
+
+static std::unique_ptr<AstNode> elaborate_positional_pattern(AstNode *pattern, const std::vector<AstNode*> &members)
+{
+	if (members.empty())
+		pattern->input_error("Positional assignment pattern target is not a packed struct\n");
+	if (pattern->children.size() != members.size())
+		pattern->input_error("Positional assignment pattern element count mismatch: got %d, expected %d\n",
+				GetSize(pattern->children), GetSize(members));
+
+	std::vector<AstNode*> ordered = members;
+	std::sort(ordered.begin(), ordered.end(), [](AstNode *a, AstNode *b) {
+		if (a->range_right != b->range_right)
+			return a->range_right < b->range_right;
+		return a->str < b->str;
+	});
+
+	auto concat = std::make_unique<AstNode>(pattern->location, AST_CONCAT);
+	for (auto *member : ordered) {
+		auto it = std::find(members.begin(), members.end(), member);
+		log_assert(it != members.end());
+		auto index = std::distance(members.begin(), it);
+		concat->children.push_back(cast_to_width(pattern->location, packed_member_width(member),
+				pattern_element_value(pattern->children[index].get(), member)));
+	}
+	return concat;
 }
 
 // Build an LSB-first concatenation of the struct members. Union arms share an
@@ -1994,8 +2046,18 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 
 				case AST_STRUCT:
 				case AST_UNION: {
-					child->delete_children();
 					width = size_packed_struct(template_node, 0);
+					if (GetSize(children) > 1 && children[1]->type == AST_ASSIGN_PATTERN &&
+							assignment_pattern_is_named(children[1].get())) {
+						std::vector<AstNode*> members;
+						collect_struct_members(template_node, members);
+						if (members.empty())
+							children[1]->input_error("Named assignment pattern target is not a packed struct or union\n");
+						children[1] = elaborate_named_pattern(children[1].get(), members);
+						fixup_hierarchy_flags();
+						did_something = true;
+					}
+					child->delete_children();
 					node = mkconst_int(child->location, width, false);
 					break;
 				}
@@ -3622,12 +3684,13 @@ skip_dynamic_range_lvalue_expansion:;
 	}
 
 	// Named assignment pattern: '{member: expr, default: expr} -> concatenation in
-	// struct member order (LSB first). Positional patterns stay on the unpacked-array path.
+	// struct member order (LSB first). Positional patterns and array defaults stay on the
+	// unpacked-array path.
 	if ((type == AST_ASSIGN_EQ || type == AST_ASSIGN_LE || type == AST_ASSIGN) &&
 			GetSize(children) >= 2 && children[1]->type == AST_ASSIGN_PATTERN &&
-			assignment_pattern_is_named(children[1].get()))
+			assignment_pattern_is_named(children[1].get()) && !is_unexpanded_array_ref(children[0].get()))
 	{
-		if (children[0]->type != AST_IDENTIFIER || !children[0]->children.empty())
+		if (!is_whole_struct_pattern_target(children[0].get()))
 			input_error("Named assignment pattern requires a whole struct or union target.\n");
 		auto members = members_for_lhs(children[0].get());
 		if (members.empty())
@@ -3656,6 +3719,9 @@ skip_dynamic_range_lvalue_expansion:;
 
 		// Case 3: Positional assignment pattern (out = '{a, b})
 		bool is_pattern_assign = rhs->type == AST_ASSIGN_PATTERN;
+		bool pattern_is_default = is_pattern_assign && rhs->children.size() == 1 &&
+			rhs->children[0]->attributes.count(pattern_default_attr()) != 0 &&
+			rhs->children[0]->attributes.count(pattern_member_attr()) == 0;
 
 		if (is_direct_assign || is_ternary_assign || is_pattern_assign)
 		{
@@ -3722,9 +3788,17 @@ skip_dynamic_range_lvalue_expansion:;
 			};
 
 			// Select the assignment pattern element for an unpacked array position.
+			auto clone_pattern_value = [](AstNode *element) {
+				auto value = element->clone();
+				value->attributes.erase(pattern_member_attr());
+				value->attributes.erase(pattern_default_attr());
+				return value;
+			};
 			auto pattern_element_at_position = [&](const std::vector<int>& position, int flat_index) {
+				if (pattern_is_default)
+					return clone_pattern_value(rhs->children[0].get());
 				if (pattern_is_flat)
-					return rhs->children[flat_index]->clone();
+					return clone_pattern_value(rhs->children[flat_index].get());
 
 				AstNode *pattern = rhs;
 				for (int d = 0; d < num_dims; d++) {
@@ -3732,7 +3806,7 @@ skip_dynamic_range_lvalue_expansion:;
 					AstNode *element = pattern->children[position[d]].get();
 
 					if (d + 1 == num_dims)
-						return element->clone();
+						return clone_pattern_value(element);
 
 					if (element->type == AST_ASSIGN_PATTERN) {
 						pattern = element;
@@ -3756,7 +3830,9 @@ skip_dynamic_range_lvalue_expansion:;
 				    !arrays_have_compatible_dims(lhs_mem, false_mem))
 					input_error("Array dimension mismatch in ternary expression\n");
 			} else {
-				if (num_dims > 1 && GetSize(rhs->children) == lhs_mem->dimensions[0].range_width) {
+				if (pattern_is_default) {
+					// A default assignment pattern supplies the same value to every element.
+				} else if (num_dims > 1 && GetSize(rhs->children) == lhs_mem->dimensions[0].range_width) {
 					validate_pattern_shape(rhs, 0);
 				} else if (num_dims == 1 && GetSize(rhs->children) == total_elements) {
 					pattern_is_flat = true;
@@ -5155,9 +5231,17 @@ apply_newNode:
 		// dumpAst(stderr, "- ");
 		// newNode->dumpAst(stderr, "+ ");
 		log_assert(newNode != nullptr);
+		auto member_tag = attributes.find(pattern_member_attr());
+		auto default_tag = attributes.find(pattern_default_attr());
+		auto saved_member_tag = member_tag == attributes.end() ? nullptr : member_tag->second->clone();
+		auto saved_default_tag = default_tag == attributes.end() ? nullptr : default_tag->second->clone();
 		newNode->location.begin.filename = location.begin.filename;
 		newNode->location = location;
 		newNode->cloneInto(*this);
+		if (saved_member_tag && !attributes.count(pattern_member_attr()))
+			attributes[pattern_member_attr()] = std::move(saved_member_tag);
+		if (saved_default_tag && !attributes.count(pattern_default_attr()))
+			attributes[pattern_default_attr()] = std::move(saved_default_tag);
 		fixup_hierarchy_flags();
 		did_something = true;
 	}
