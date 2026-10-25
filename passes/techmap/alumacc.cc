@@ -283,6 +283,11 @@ struct AlumaccWorker
 						continue;
 
 					auto other_n = sig_macc.at(port.in_a);
+					// Keep annotated additions as separate $alu candidates so their
+					// mapping choice is not lost when a sum becomes a multi-term $macc.
+					if (n->cell->get_bool_attribute(ID(no_carry)) || n->cell->get_bool_attribute(ID(use_carry)) ||
+						other_n->cell->get_bool_attribute(ID(no_carry)) || other_n->cell->get_bool_attribute(ID(use_carry)))
+						continue;
 
 					if (other_n->users > 1 || other_n->cell->has_keep_attr())
 						continue;

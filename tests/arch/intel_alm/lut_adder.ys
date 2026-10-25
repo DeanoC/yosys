@@ -81,6 +81,14 @@ cd attr_carry
 select -assert-count 5 t:MISTRAL_ALUT_ARITH
 select -assert-none t:MISTRAL_ALUT_ARITH %% t:* %D
 
+# An annotated term stays separate when alumacc would otherwise merge the sum.
+design -load read
+hierarchy -top macc_use_carry
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf -lutadders 8
+design -load postopt
+cd macc_use_carry
+select -assert-count 8 t:MISTRAL_ALUT_ARITH
+
 # The same attribute on the result wire.
 design -load read
 hierarchy -top wire_soft
@@ -88,3 +96,11 @@ equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cycl
 design -load postopt
 cd wire_soft
 select -assert-none t:MISTRAL_ALUT_ARITH
+
+# Result-wire attributes are captured before iopadmap moves the port net.
+design -load read
+hierarchy -top wire_soft
+synth_intel_alm -family cyclonev -nolutram -nodsp -noclkbuf
+cd wire_soft
+select -assert-none t:MISTRAL_ALUT_ARITH
+select -assert-count 8 t:MISTRAL_OB

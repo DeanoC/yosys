@@ -28,6 +28,10 @@ module attr_carry(input [4:0] a, input [4:0] b, output [4:0] y);
     assign y = a + (* use_carry *) b;
 endmodule
 
+module macc_use_carry(input [7:0] a, input [7:0] b, input [7:0] c, output [7:0] y);
+    assign y = (a + b) + (* use_carry *) c;
+endmodule
+
 module wire_soft(input [7:0] a, input [7:0] b, (* no_carry *) output [7:0] y);
     assign y = a + b;
 endmodule
