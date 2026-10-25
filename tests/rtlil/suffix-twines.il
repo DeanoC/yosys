@@ -1,12 +1,12 @@
 autoidx 1
 twines
-  leaf 1055 "everything"
-  suffix 1056 1055 ".a"
-  suffix 1057 1055 ".b"
-  leaf 1058 "tiny"
+  leaf 1058 "everything"
+  suffix 1059 1058 ".a"
+  suffix 1060 1058 ".b"
+  leaf 1061 "tiny"
 end
-module $pub@1058  # \tiny
-  wire input 1 $pub@1056  # \everything.a
-  wire output 2 $pub@1057  # \everything.b
-  connect $pub@1057 $pub@1056  # \everything.b \everything.a
+module $pub@1061  # \tiny
+  wire input 1 $pub@1059  # \everything.a
+  wire output 2 $pub@1060  # \everything.b
+  connect $pub@1060 $pub@1059  # \everything.b \everything.a
 end

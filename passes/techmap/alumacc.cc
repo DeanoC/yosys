@@ -585,6 +585,13 @@ struct AlumaccWorker
 
 			if (n->cells.size() > 0)
 				n->alu_cell->set_src_attribute(n->cells[0]->get_src_attribute());
+			// synth_intel_alm uses these to choose LUTs over a carry chain.
+			for (auto c : n->cells) {
+				if (c->get_bool_attribute(ID(no_carry)))
+					n->alu_cell->set_bool_attribute(ID(no_carry));
+				if (c->get_bool_attribute(ID(use_carry)))
+					n->alu_cell->set_bool_attribute(ID(use_carry));
+			}
 
 			n->alu_cell->setPort(ID::A, n->a);
 			n->alu_cell->setPort(ID::B, n->b);
