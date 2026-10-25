@@ -103,13 +103,7 @@ YOSYS_NAMESPACE_END
 
 static bool isUserType(ParseState* extra, std::string &s)
 {
-	// check current scope then outer scopes for a name
-	for (auto it = extra->user_type_stack.rbegin(); it != extra->user_type_stack.rend(); ++it) {
-		if (it->count(s) > 0) {
-				return true;
-		}
-	}
-	return false;
+	return extra->isUserType(s);
 }
 
 parser::symbol_type char_tok(char c, parser::location_type loc) {
@@ -539,6 +533,11 @@ supply1 { return parser::make_TOK_SUPPLY1(out_loc); }
 
 [a-zA-Z_$][a-zA-Z0-9_$]* {
 	auto s = std::string("\\") + YYText();
+	if (extra->expecting_wire_name && extra->isImportedType(s)) {
+		extra->expecting_wire_name = false;
+		auto val = std::make_unique<std::string>(s);
+		return parser::make_TOK_ID(std::move(val), out_loc);
+	}
 	if (isUserType(extra, s)) {
 		// previously typedefed name
 		auto val = std::make_unique<std::string>(s);
