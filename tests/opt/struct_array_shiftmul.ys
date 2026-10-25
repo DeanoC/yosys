@@ -1,0 +1,64 @@
+# Two member selects on one variable-indexed packed-struct element.
+# Each select lowers to $shiftx(arr, i*W + offset). opt_merge shares the
+# i*W $mul. wreduce must still narrow every reader of that $mul, or the
+# shiftmul fold misses one of them and synth_intel_alm maps it to a DSP.
+
+read_verilog -sv <<EOT
+typedef struct packed {
+    logic        a;
+    logic        b;
+    logic [39:0] rest;
+} rec_t;
+
+module two_fields (
+    input  rec_t [31:0] arr,
+    input  logic [4:0]  i,
+    output logic        ya,
+    output logic        yb
+);
+    assign ya = arr[i].a;
+    assign yb = arr[i].b;
+endmodule
+EOT
+
+hierarchy -top two_fields
+proc
+design -save gold
+opt; wreduce; peepopt; opt_clean
+select -assert-none t:$mul
+select -assert-none t:$add
+select -assert-count 2 t:$bmux
+design -stash gate
+
+design -import gold -as gold two_fields
+design -import gate -as gate two_fields
+miter -equiv -make_assert -make_outputs -flatten gold gate miter
+sat -verify -show-public -prove-asserts miter
+
+design -reset
+read_verilog -sv <<EOT
+typedef struct packed {
+    logic        a;
+    logic        b;
+    logic [39:0] rest;
+} rec_t;
+
+module two_fields (
+    input  rec_t [31:0] arr,
+    input  logic [4:0]  i,
+    output logic        ya,
+    output logic        yb
+);
+    assign ya = arr[i].a;
+    assign yb = arr[i].b;
+endmodule
+EOT
+
+hierarchy -top two_fields
+proc
+synth_intel_alm -family cyclonev -nolutram
+cd two_fields
+select -assert-none t:$mul
+select -assert-none t:MISTRAL_MUL9X9
+select -assert-none t:MISTRAL_MUL18X18
+select -assert-none t:MISTRAL_MUL27X27
