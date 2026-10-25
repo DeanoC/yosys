@@ -1414,6 +1414,61 @@ AST_INTERNAL::process_and_replace_module(RTLIL::Design *design,
 }
 
 // renames identifiers in tasks and functions within a package
+static bool is_package_local_declaration(AstNodeType type)
+{
+	switch (type) {
+	case AST_WIRE:
+	case AST_MEMORY:
+	case AST_AUTOWIRE:
+	case AST_PARAMETER:
+	case AST_LOCALPARAM:
+	case AST_DEFPARAM:
+	case AST_GENVAR:
+	case AST_TYPEDEF:
+	case AST_ENUM:
+	case AST_ENUM_ITEM:
+	case AST_STRUCT:
+	case AST_UNION:
+	case AST_FUNCTION:
+	case AST_TASK:
+	case AST_DPI_FUNCTION:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool is_package_local_scope(AstNodeType type)
+{
+	return type == AST_FUNCTION || type == AST_TASK || type == AST_BLOCK || type == AST_FOR;
+}
+
+static bool is_package_function_result(const AstNode *scope, const AstNode *node)
+{
+	return scope->type == AST_FUNCTION && node->type == AST_WIRE && node->str == scope->str;
+}
+
+static void collect_package_locals(AstNode *scope, std::unordered_set<std::string> &locals)
+{
+	std::function<void(AstNode *)> collect_enum_items = [&collect_enum_items, &locals](AstNode *node) {
+		if (node->type == AST_ENUM_ITEM) {
+			locals.insert(node->str);
+			return;
+		}
+		for (auto &child : node->children)
+			collect_enum_items(child.get());
+	};
+
+	for (auto &child : scope->children) {
+		if (!is_package_local_declaration(child->type))
+			continue;
+		// The function result wire follows the function's package-qualified name.
+		if (!child->str.empty() && !is_package_function_result(scope, child.get()))
+			locals.insert(child->str);
+		collect_enum_items(child.get());
+	}
+}
+
 static void rename_in_package_stmts(AstNode *pkg)
 {
 	std::unordered_set<std::string> idents;
@@ -1426,17 +1481,29 @@ static void rename_in_package_stmts(AstNode *pkg)
 			for (auto& enode : item->children)
 				idents.insert(enode->str);
 	}
-	std::function<void(std::unique_ptr<AstNode>&)> rename =
-		[&rename, &idents, pkg](std::unique_ptr<AstNode>& node) {
+	std::function<void(AstNode *, const std::unordered_set<std::string> &)> rename =
+		[&rename, &idents, pkg](AstNode *node, const std::unordered_set<std::string> &parent_locals) {
+			std::unordered_set<std::string> locals;
+			const std::unordered_set<std::string> *scope_locals = &parent_locals;
+			if (is_package_local_scope(node->type)) {
+				locals = parent_locals;
+				collect_package_locals(node, locals);
+				scope_locals = &locals;
+			}
 			for (auto& child : node->children) {
-				if (idents.count(child->str))
+				// Value-space local declarations shadow AST_IDENTIFIER references.
+				bool is_shadowed_reference = child->type == AST_IDENTIFIER && scope_locals->count(child->str);
+				bool is_function_result = is_package_function_result(node, child.get());
+				bool is_declaration = is_package_local_declaration(child->type) && !is_function_result;
+				if (!is_declaration && !is_shadowed_reference && idents.count(child->str))
 					child->str = pkg->str + "::" + child->str.substr(1);
-				rename(child);
+				rename(child.get(), *scope_locals);
 			}
 	};
+	std::unordered_set<std::string> no_locals;
 	for (auto& item : pkg->children)
 		if (item->type == AST_FUNCTION || item->type == AST_TASK)
-			rename(item);
+			rename(item.get(), no_locals);
 }
 
 // create AstModule instances for all modules in the AST tree and add them to 'design'
