@@ -357,8 +357,6 @@ static bool is_private_wire(const RTLIL::Wire *wire)
 {
 	if (wire->port_id != 0 || wire->name.isPublic())
 		return false;
-	if (wire->get_bool_attribute(ID::keep))
-		return false;
 	return true;
 }
 
