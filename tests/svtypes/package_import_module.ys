@@ -1,0 +1,4 @@
+read_verilog -sv package_import_module.sv
+prep -top top -flatten
+async2sync
+sat -verify -prove-asserts

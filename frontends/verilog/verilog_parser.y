@@ -93,6 +93,7 @@
 			AstNode* pushChild(std::unique_ptr<AstNode> child);
 			void addWiretypeNode(std::string *name, AstNode* node);
 			void addTypedefNode(std::string *name, std::unique_ptr<AstNode> node);
+			void registerImportedPackageTypes(const AstNode *import_node);
 			void enterTypeScope();
 			void exitTypeScope();
 			bool isInLocalScope(const std::string *name);
@@ -125,6 +126,22 @@
 }
 
 %code {
+	// The identifier after `import p::*;` is already the lookahead when this
+	// action runs. Retag it if the import made it a type.
+	#define YOSYS_PROMOTE_IMPORTED_TYPE_LOOKAHEAD() \
+		do { \
+			if (yyla.kind() == symbol_kind::S_TOK_ID) { \
+				auto &imported_id = yyla.value.as<string_t>(); \
+				if (imported_id) { \
+					bool known_type = false; \
+					for (auto it = extra->user_type_stack.rbegin(); it != extra->user_type_stack.rend() && !known_type; ++it) \
+						known_type = it->count(*imported_id) != 0; \
+					if (known_type) \
+						yyla.kind_ = symbol_kind::S_TOK_USER_TYPE; \
+				} \
+			} \
+		} while (0)
+
 	#include <list>
 	#include <stack>
 	#include <memory>
@@ -272,6 +289,44 @@
 				// typedef inside a package so we need the qualified name
 				auto qname = current_ast_mod->str + "::" + (*name).substr(1);
 				pkg_user_types[qname] = tnode;
+			}
+		}
+
+		static void addQualifiedImport(ParseState *extra, const std::string &qname, const frontend_verilog_yy::parser::location_type &loc)
+		{
+			auto sep = qname.find("::");
+			if (sep == std::string::npos || qname.empty() || qname[0] != '\\')
+				err_at_loc(loc, "Malformed package import `%s'.", qname.c_str());
+			auto import_node = std::make_unique<AstNode>(loc, AST_IMPORT);
+			import_node->str = qname.substr(0, sep);
+			auto item = std::make_unique<AstNode>(loc, AST_NONE);
+			item->str = "\\" + qname.substr(sep + 2);
+			import_node->children.push_back(std::move(item));
+			AstNode *raw = import_node.get();
+			extra->ast_stack.back()->children.push_back(std::move(import_node));
+			extra->registerImportedPackageTypes(raw);
+		}
+
+		void ParseState::registerImportedPackageTypes(const AstNode *import_node)
+		{
+			if (user_type_stack.empty() || import_node->str.empty())
+				return;
+			std::string prefix = import_node->str + "::";
+			auto &user_types = user_type_stack.back();
+			if (import_node->children.empty()) {
+				for (auto &kv : pkg_user_types) {
+					if (kv.first.compare(0, prefix.size(), prefix) != 0)
+						continue;
+					user_types["\\" + kv.first.substr(prefix.size())] = kv.second;
+				}
+			} else {
+				for (auto &item : import_node->children) {
+					if (item->str.empty() || item->str[0] != '\\')
+						continue;
+					auto it = pkg_user_types.find(prefix + item->str.substr(1));
+					if (it != pkg_user_types.end())
+						user_types[item->str] = it->second;
+				}
 			}
 		}
 
@@ -701,17 +756,20 @@ module:
 		extra->port_counter = 0;
 		mod->str = *$4;
 		append_attr(mod, std::move($1));
-	} module_para_opt module_args_opt TOK_SEMICOL module_body TOK_ENDMODULE opt_label {
+	} module_import_list module_para_opt module_args_opt TOK_SEMICOL module_body TOK_ENDMODULE opt_label {
 		if (extra->port_stubs.size() != 0)
-			err_at_loc(@7, "Missing details for module port `%s'.",
+			err_at_loc(@8, "Missing details for module port `%s'.",
 					extra->port_stubs.begin()->first.c_str());
 		SET_AST_NODE_LOC(extra->ast_stack.back(), @2, @$);
 		extra->ast_stack.pop_back();
 		log_assert(extra->ast_stack.size() == 1);
-		checkLabelsMatch(@11, "Module name", $4.get(), $11.get());
+		checkLabelsMatch(@12, "Module name", $4.get(), $12.get());
 		extra->current_ast_mod = nullptr;
 		extra->exitTypeScope();
 	};
+
+module_import_list:
+	module_import_list import_stmt | %empty;
 
 module_para_opt:
 	TOK_HASH TOK_LPAREN module_para_list TOK_RPAREN | %empty;
@@ -832,7 +890,10 @@ import_stmt:
 		// Create an import node to track wildcard package imports
 		auto import_node = std::make_unique<AstNode>(@$, AST_IMPORT);
 		import_node->str = *$2;
+		AstNode *raw = import_node.get();
 		extra->ast_stack.back()->children.push_back(std::move(import_node));
+		extra->registerImportedPackageTypes(raw);
+		YOSYS_PROMOTE_IMPORTED_TYPE_LOOKAHEAD();
 	} |
 	TOK_IMPORT TOK_ID TOK_PACKAGESEP {
 		// Start a specific import: create and push the AST_IMPORT node
@@ -840,7 +901,21 @@ import_stmt:
 		import_node->str = *$2;
 	} import_item_list TOK_SEMICOL {
 		// Done collecting specific items, pop the AST_IMPORT node
+		extra->registerImportedPackageTypes(extra->ast_stack.back());
 		extra->ast_stack.pop_back();
+		YOSYS_PROMOTE_IMPORTED_TYPE_LOOKAHEAD();
+	} |
+	TOK_IMPORT qualified_import_list TOK_SEMICOL {
+		// `pkg::typedef` is one TOK_PKG_USER_TYPE, not pkg + :: + name.
+		YOSYS_PROMOTE_IMPORTED_TYPE_LOOKAHEAD();
+	};
+
+qualified_import_list:
+	TOK_PKG_USER_TYPE {
+		addQualifiedImport(extra, *$1, @1);
+	} |
+	qualified_import_list TOK_COMMA TOK_PKG_USER_TYPE {
+		addQualifiedImport(extra, *$3, @3);
 	};
 
 import_item_list:
@@ -1101,7 +1176,7 @@ module_body:
 	%empty;
 
 module_body_stmt:
-	task_func_decl | specify_block | param_decl | localparam_decl | typedef_decl | defparam_decl | specparam_declaration | wire_decl | assign_stmt | cell_stmt |
+	import_stmt | task_func_decl | specify_block | param_decl | localparam_decl | typedef_decl | defparam_decl | specparam_declaration | wire_decl | assign_stmt | cell_stmt |
 	enum_decl | struct_decl |
 	always_stmt | TOK_GENERATE module_gen_body TOK_ENDGENERATE | defattr | assert_property | checker_decl | ignored_specify_block;
 
