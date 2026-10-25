@@ -150,12 +150,30 @@ select -assert-count 1 t:$eq
 
 design -reset
 read_verilog -sv <<EOF
-module top(input clk, input [1:0] d, a, output y);
+module top(input [1:0] a, b, input en0, en1, output [1:0] y);
+  logic public0, public1, h0, h1;
+  always_comb public0 = a == b;
+  always_comb public1 = a == b;
+  (* nomerge=1 *) always_comb h0 = public0 && en0;
+  (* nomerge=1 *) always_comb h1 = public1 && en1;
+  assign y = {h0, h1};
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 1 t:$eq
+select -assert-count 2 t:$logic_and
+
+design -reset
+read_verilog -sv <<EOF
+module top(input clk, input [1:0] d, a, output [1:0] y);
   reg [1:0] page = 0, page2 = 0;
   always @(posedge clk) page <= d;
   always @(posedge clk) page2 <= d;
   (* nomerge *) wire hit = page == a;
-  assign y = hit;
+  assign y = {hit, page2[0]};
 endmodule
 EOF
 hierarchy -top top
@@ -164,3 +182,23 @@ opt_merge
 opt_clean
 select -assert-count 1 t:$dff
 select -assert-count 1 t:$eq
+
+design -reset
+read_verilog -sv <<EOF
+module top(input [1:0] a, b, c, d, output [1:0] y);
+  (* nomerge *) wire h0 = a == b;
+  wire h1 = a == b;
+  wire h2 = c == d;
+  wire h3 = c == d;
+  assign y = {h0 ^ h1, h2 ^ h3};
+endmodule
+EOF
+hierarchy -top top
+proc
+select top/h0
+opt_merge
+select -clear
+setattr -unset nomerge top/h0
+opt_merge
+opt_clean
+select -assert-count 2 t:$eq

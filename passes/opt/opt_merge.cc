@@ -372,6 +372,15 @@ static void protect_nomerge_drivers(RTLIL::Module *module, const SigMap &assign_
 	if (nomerge == RTLIL::IdString())
 		return;
 
+	pool<RTLIL::SigBit> non_private_bits;
+	for (auto wire : module->wires()) {
+		if (is_private_wire(wire))
+			continue;
+		for (auto bit : assign_map(wire))
+			if (bit.wire)
+				non_private_bits.insert(bit);
+	}
+
 	pool<RTLIL::SigBit> roots;
 	for (auto wire : module->wires()) {
 		if (!wire->get_bool_attribute(nomerge))
@@ -385,6 +394,8 @@ static void protect_nomerge_drivers(RTLIL::Module *module, const SigMap &assign_
 
 	dict<RTLIL::SigBit, std::vector<RTLIL::Cell*>> drivers;
 	for (auto cell : module->cells()) {
+		if (!module->selected(cell))
+			continue;
 		for (auto &conn : cell->connections()) {
 			if (!cell->output(conn.first))
 				continue;
@@ -418,7 +429,7 @@ static void protect_nomerge_drivers(RTLIL::Module *module, const SigMap &assign_
 				if (!cell->input(conn.first))
 					continue;
 				for (auto bit : assign_map(conn.second)) {
-					if (!bit.wire || !is_private_wire(bit.wire))
+					if (!bit.wire || non_private_bits.count(bit))
 						continue;
 					if (queued.insert(bit).second)
 						queue.push_back(bit);
