@@ -439,8 +439,6 @@ static bool latch_wire_is_private(const RTLIL::Wire *wire)
 {
 	if (wire->port_id != 0 || wire->name.isPublic())
 		return false;
-	if (wire->get_bool_attribute(ID::keep))
-		return false;
 	return true;
 }
 
@@ -450,21 +448,28 @@ static bool latch_wire_is_private(const RTLIL::Wire *wire)
 static void mark_nomerge_latches(proc_dlatch_db_t &db, RTLIL::IdString nomerge,
 		const std::vector<RTLIL::Cell*> &latches)
 {
+	// proc_dlatch may have added connections while converting combinational
+	// processes, so the database's original SigMap can no longer represent the
+	// module's aliases.
+	SigMap sigmap(db.module);
+
 	pool<RTLIL::SigBit> boundary;
 	for (auto wire : db.module->wires()) {
 		if (latch_wire_is_private(wire))
 			continue;
-		for (auto bit : db.sigmap(wire))
+		for (auto bit : sigmap(wire))
 			if (bit.wire)
 				boundary.insert(bit);
 	}
 
 	dict<RTLIL::SigBit, std::vector<RTLIL::Cell*>> drivers;
 	for (auto cell : db.module->cells()) {
+		if (!db.module->selected(cell))
+			continue;
 		for (auto &conn : cell->connections()) {
 			if (!cell->output(conn.first))
 				continue;
-			for (auto bit : db.sigmap(conn.second))
+			for (auto bit : sigmap(conn.second))
 				if (bit.wire)
 					drivers[bit].push_back(cell);
 		}
@@ -477,7 +482,7 @@ static void mark_nomerge_latches(proc_dlatch_db_t &db, RTLIL::IdString nomerge,
 		for (auto &conn : cell->connections()) {
 			if (!cell->input(conn.first))
 				continue;
-			for (auto bit : db.sigmap(conn.second)) {
+			for (auto bit : sigmap(conn.second)) {
 				if (!bit.wire || boundary.count(bit))
 					continue;
 				if (queued.insert(bit).second)

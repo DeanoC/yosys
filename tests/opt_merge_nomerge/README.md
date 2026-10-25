@@ -6,11 +6,11 @@ On a latch process, `proc_dlatch` copies it onto the inferred latch and
 the private enable and data cone that feeds that latch.
 `(* nomerge *)` on a wire covers the private logic driving that wire, so
 replicated cones stay distinct. Public nets and ports remain shared
-boundaries. `opt_merge` excludes true-marked cells from duplicate matching
-on either side. Absent or false attributes retain existing behavior, as
-does `(* keep *)` on a wire. This is narrower than `keep`: unused marked
-cells can still be removed. It is not a placement lock or timing
-exception, and does not disable constant-state simplification.
+boundaries. Private wires marked `keep` remain inside the traced cone.
+`opt_merge` excludes true-marked cells from duplicate matching on either
+side. Absent or false attributes retain existing behavior. This is narrower
+than `keep`: unused marked cells can still be removed. It is not a placement
+lock or timing exception, and does not disable constant-state simplification.
 
 The attribute name is looked up once on the design twine pool before workers
 start. Worker threads must not intern twines. A missing name means no cell
