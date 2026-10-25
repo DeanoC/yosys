@@ -2747,7 +2747,9 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 
 			if (type == AST_GENFOR) {
 				for (size_t i = 0; i < buf->children.size(); i++) {
-					buf->children[i]->simplify(const_fold, stage, -1, false);
+					// A packed multirange needs more than one pass before range_valid is set.
+					// Later statements in this iteration read that width.
+					while (buf->children[i]->simplify(const_fold, stage, -1, false)) { }
 					current_ast_mod->children.push_back(std::move(buf->children[i]));
 				}
 			} else {
@@ -2832,7 +2834,7 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 		}
 
 		for (size_t i = 0; i < children.size(); i++) {
-			children[i]->simplify(const_fold, stage, -1, false);
+			while (children[i]->simplify(const_fold, stage, -1, false)) { }
 			current_ast_mod->children.push_back(std::move(children[i]));
 		}
 
@@ -2869,7 +2871,7 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			}
 
 			for (size_t i = 0; i < buf->children.size(); i++) {
-				buf->children[i]->simplify(const_fold, stage, -1, false);
+				while (buf->children[i]->simplify(const_fold, stage, -1, false)) { }
 				current_ast_mod->children.push_back(std::move(buf->children[i]));
 			}
 
@@ -2951,7 +2953,7 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			}
 
 			for (size_t i = 0; i < buf->children.size(); i++) {
-				buf->children[i]->simplify(const_fold, stage, -1, false);
+				while (buf->children[i]->simplify(const_fold, stage, -1, false)) { }
 				current_ast_mod->children.push_back(std::move(buf->children[i]));
 			}
 
