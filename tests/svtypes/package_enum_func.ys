@@ -1,0 +1,5 @@
+read_verilog -sv package_enum_func.sv
+prep -top top
+async2sync
+# Binary inputs only. With -enable_undef, `y2 == q` is x when q itself is x.
+sat -verify -prove-asserts

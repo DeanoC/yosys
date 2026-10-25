@@ -1417,8 +1417,15 @@ AST_INTERNAL::process_and_replace_module(RTLIL::Design *design,
 static void rename_in_package_stmts(AstNode *pkg)
 {
 	std::unordered_set<std::string> idents;
-	for (auto& item : pkg->children)
+	for (auto& item : pkg->children) {
 		idents.insert(item->str);
+		// Enum items are not package children. Without them, a use of SEG_FS
+		// inside a package function stays unqualified while the elaborated
+		// item is named \pkg::SEG_FS.
+		if (item->type == AST_ENUM)
+			for (auto& enode : item->children)
+				idents.insert(enode->str);
+	}
 	std::function<void(std::unique_ptr<AstNode>&)> rename =
 		[&rename, &idents, pkg](std::unique_ptr<AstNode>& node) {
 			for (auto& child : node->children) {
