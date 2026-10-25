@@ -535,10 +535,16 @@ struct VerilogFrontend : public Frontend {
 		}
 
 		log_assert(parse_state.user_type_stack.empty());
+		log_assert(parse_state.imported_type_stack.empty());
+		log_assert(parse_state.local_decl_stack.empty());
 		// use previous global typedefs as bottom level of user type stack
 		parse_state.user_type_stack.push_back(std::move(global_types_map));
+		parse_state.imported_type_stack.emplace_back();
+		parse_state.local_decl_stack.emplace_back();
 		// add a new empty type map to allow overriding existing global definitions
 		parse_state.user_type_stack.push_back(UserTypeMap());
+		parse_state.imported_type_stack.emplace_back();
+		parse_state.local_decl_stack.emplace_back();
 
 		if (flag_yydebug) {
 			lexer.set_debug(true);
@@ -569,6 +575,10 @@ struct VerilogFrontend : public Frontend {
 		// only the previous and new global type maps remain
 		log_assert(parse_state.user_type_stack.size() == 2);
 		parse_state.user_type_stack.clear();
+		log_assert(parse_state.imported_type_stack.size() == 2);
+		parse_state.imported_type_stack.clear();
+		log_assert(parse_state.local_decl_stack.size() == 2);
+		parse_state.local_decl_stack.clear();
 
 		delete parse_state.current_ast;
 		parse_state.current_ast = NULL;

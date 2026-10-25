@@ -6336,6 +6336,7 @@ bool AstNode::replace_variables(std::map<std::string, AstNode::varinfo_t> &varia
 {
 	if (type == AST_IDENTIFIER && variables.count(str)) {
 		int offset = variables.at(str).offset, width = variables.at(str).val.size();
+		int member_offset = 0, member_width = -1, selected_offset = offset;
 		if (!children.empty()) {
 			if (children.size() != 1 || children.at(0)->type != AST_RANGE) {
 				if (!must_succeed)
@@ -6353,7 +6354,15 @@ bool AstNode::replace_variables(std::map<std::string, AstNode::varinfo_t> &varia
 						fcall->loc_string().c_str());
 			}
 			offset = min(children.at(0)->range_left, children.at(0)->range_right);
-			width = min(std::abs(children.at(0)->range_left - children.at(0)->range_right) + 1, width);
+			selected_offset = offset;
+			width = std::abs(children.at(0)->range_left - children.at(0)->range_right) + 1;
+			// make_index_range() is relative to the member. genRTLIL adds the
+			// member's base offset; constant evaluation has to do the same.
+			if (AstNode *member = get_struct_member()) {
+				member_offset = min(member->range_left, member->range_right);
+				member_width = std::abs(member->range_left - member->range_right) + 1;
+				offset += member_offset;
+			}
 		}
 		offset -= variables.at(str).offset;
 		if (variables.at(str).range_swapped)
@@ -6361,8 +6370,15 @@ bool AstNode::replace_variables(std::map<std::string, AstNode::varinfo_t> &varia
 		const RTLIL::Const &val = variables.at(str).val;
 		std::vector<RTLIL::State> new_bits;
 		new_bits.reserve(width);
-		for (int i = 0; i < width; i++)
-			new_bits.push_back(val[offset+i]);
+		for (int i = 0; i < width; i++) {
+			int member_index = selected_offset + i;
+			int value_index = offset + i;
+			if ((member_width >= 0 && (member_index < 0 || member_index >= member_width)) ||
+					value_index < 0 || value_index >= GetSize(val))
+				new_bits.push_back(RTLIL::State::Sx);
+			else
+				new_bits.push_back(val[value_index]);
+		}
 		auto newNode = mkconst_bits(location, new_bits, variables.at(str).is_signed);
 		newNode->cloneInto(*this);
 		return true;
@@ -6468,6 +6484,15 @@ std::unique_ptr<AstNode> AstNode::eval_const_function(AstNode *fcall, bool must_
 			if (stmt->type != AST_ASSIGN_EQ)
 				continue;
 
+			// Member selects are rewritten to a range on the parent during simplify,
+			// so a value such as f.b is only visible to replace_variables afterwards.
+			if (!stmt->children.at(1)->replace_variables(variables, fcall, must_succeed))
+				goto finished;
+			while (stmt->simplify(true, 1, -1, false)) { }
+
+			if (stmt->type != AST_ASSIGN_EQ)
+				continue;
+
 			if (stmt->children.at(1)->type != AST_CONSTANT) {
 				if (!must_succeed)
 					goto finished;
@@ -6499,13 +6524,24 @@ std::unique_ptr<AstNode> AstNode::eval_const_function(AstNode *fcall, bool must_
 					range->input_error("Non-constant range\n%s: ... called from here.\n", fcall->loc_string());
 				}
 				int offset = min(range->range_left, range->range_right);
+				int selected_offset = offset;
+				int member_width = -1;
+				if (AstNode *member = stmt->children.at(0)->get_struct_member()) {
+					offset += min(member->range_left, member->range_right);
+					member_width = std::abs(member->range_left - member->range_right) + 1;
+				}
 				int width = std::abs(range->range_left - range->range_right) + 1;
 				varinfo_t &v = variables[stmt->children.at(0)->str];
-				RTLIL::Const r = stmt->children.at(1)->bitsAsConst(v.val.size());
+				RTLIL::Const r = stmt->children.at(1)->bitsAsConst(width);
 				for (int i = 0; i < width; i++) {
+					int member_index = selected_offset + i;
+					if (member_width >= 0 && (member_index < 0 || member_index >= member_width))
+						continue;
 					int index = i + offset - v.offset;
 					if (v.range_swapped)
 						index = -index;
+					if (index < 0 || index >= GetSize(v.val))
+						continue;
 					v.val.set(index, r.at(i));
 				}
 			}

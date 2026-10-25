@@ -1,0 +1,4 @@
+read_verilog -sv package_typedef_shadow.sv
+prep -top top
+async2sync
+sat -verify -prove-asserts
