@@ -1,0 +1,166 @@
+# (* nomerge *) on a wire keeps the private cone that drives it.
+# (* keep *) on a wire does not. Unmarked logic still merges.
+
+design -reset
+read_verilog -sv <<EOF
+module top(input [1:0] a, b, output y);
+  wire h0 = a == b;
+  wire h1 = a == b;
+  assign y = h0 ^ h1;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 1 t:$eq
+
+design -reset
+read_verilog -sv <<EOF
+module top(input [1:0] a, b, output y);
+  (* nomerge *) wire h0 = a == b;
+  (* nomerge *) wire h1 = a == b;
+  assign y = h0 ^ h1;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 2 t:$eq
+
+design -reset
+read_verilog -sv <<EOF
+module top(input [1:0] a, b, output y);
+  (* nomerge=0 *) wire h0 = a == b;
+  (* nomerge=0 *) wire h1 = a == b;
+  assign y = h0 ^ h1;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 1 t:$eq
+
+design -reset
+read_verilog -sv <<EOF
+module top(input [1:0] a, b, output y);
+  (* keep *) wire h0 = a == b;
+  (* keep *) wire h1 = a == b;
+  assign y = h0 ^ h1;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 1 t:$eq
+
+design -reset
+read_verilog -sv <<EOF
+module top(input [1:0] a, b, output [2:0] y);
+  (* nomerge *) wire h0 = a == b;
+  wire h1 = a == b;
+  wire h2 = a == b;
+  assign y = {h0, h1, h2};
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 2 t:$eq
+
+design -reset
+read_verilog -sv <<EOF
+module top(input [1:0] a, b, output [2:0] y);
+  (* nomerge *) wire [2:0] hit;
+  assign hit[0] = a == b;
+  assign hit[1] = a == b;
+  assign hit[2] = a == b;
+  assign y = hit;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 3 t:$eq
+
+design -reset
+read_verilog -sv <<EOF
+module top(input en, input [1:0] a, b, output y);
+  (* nomerge *) wire h0 = en && (a == b);
+  (* nomerge *) wire h1 = en && (a == b);
+  assign y = h0 ^ h1;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 2 t:$eq
+select -assert-count 2 t:$logic_and
+
+design -reset
+read_verilog -sv <<EOF
+module top(input [1:0] a, b, output y);
+  logic h0, h1;
+  always_comb h0 = a == b;
+  always_comb h1 = a == b;
+  assign y = h0 ^ h1;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 1 t:$eq
+
+design -reset
+read_verilog -sv <<EOF
+module top(input [1:0] a, b, output y);
+  logic h0, h1;
+  (* nomerge=1 *) always_comb h0 = a == b;
+  (* nomerge=1 *) always_comb h1 = a == b;
+  assign y = h0 ^ h1;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 2 t:$eq
+
+design -reset
+read_verilog -sv <<EOF
+module top(input [1:0] a, b, output y);
+  logic h0, h1;
+  (* nomerge=0 *) always_comb h0 = a == b;
+  (* nomerge=0 *) always_comb h1 = a == b;
+  assign y = h0 ^ h1;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 1 t:$eq
+
+design -reset
+read_verilog -sv <<EOF
+module top(input clk, input [1:0] d, a, output y);
+  reg [1:0] page = 0, page2 = 0;
+  always @(posedge clk) page <= d;
+  always @(posedge clk) page2 <= d;
+  (* nomerge *) wire hit = page == a;
+  assign y = hit;
+endmodule
+EOF
+hierarchy -top top
+proc
+opt_merge
+opt_clean
+select -assert-count 1 t:$dff
+select -assert-count 1 t:$eq

@@ -353,6 +353,84 @@ struct OptMergeThreadWorker
 	}
 };
 
+static bool is_private_wire(const RTLIL::Wire *wire)
+{
+	if (wire->port_id != 0 || wire->name.isPublic())
+		return false;
+	if (wire->get_bool_attribute(ID::keep))
+		return false;
+	return true;
+}
+
+// (* nomerge *) on a wire applies to the private logic that drives it.
+// Public nets and ports stay shared boundaries, so a register feeding the
+// replica is not frozen. Combinational processes copy the attribute onto
+// the wires they drive; clocked processes already copy it onto their FFs.
+static void protect_nomerge_drivers(RTLIL::Module *module, const SigMap &assign_map)
+{
+	RTLIL::IdString nomerge = module->twines().find("\\nomerge");
+	if (nomerge == RTLIL::IdString())
+		return;
+
+	pool<RTLIL::SigBit> roots;
+	for (auto wire : module->wires()) {
+		if (!wire->get_bool_attribute(nomerge))
+			continue;
+		for (auto bit : assign_map(wire))
+			if (bit.wire)
+				roots.insert(bit);
+	}
+	if (roots.empty())
+		return;
+
+	dict<RTLIL::SigBit, std::vector<RTLIL::Cell*>> drivers;
+	for (auto cell : module->cells()) {
+		for (auto &conn : cell->connections()) {
+			if (!cell->output(conn.first))
+				continue;
+			for (auto bit : assign_map(conn.second))
+				if (bit.wire)
+					drivers[bit].push_back(cell);
+		}
+	}
+
+	pool<RTLIL::Cell*> seen;
+	std::vector<RTLIL::SigBit> queue(roots.begin(), roots.end());
+	pool<RTLIL::SigBit> queued = roots;
+	int protected_cells = 0;
+	for (size_t i = 0; i < queue.size(); i++) {
+		auto found = drivers.find(queue[i]);
+		if (found == drivers.end())
+			continue;
+		for (auto cell : found->second) {
+			if (!seen.insert(cell).second)
+				continue;
+			if (!cell->get_bool_attribute(nomerge)) {
+				cell->set_bool_attribute(nomerge, true);
+				protected_cells++;
+			}
+			if (cell->is_builtin_ff())
+				continue;
+			if (cell->type.in(ID($mem), ID($mem_v2), ID($memrd), ID($memrd_v2),
+					ID($memwr), ID($memwr_v2), ID($meminit), ID($meminit_v2)))
+				continue;
+			for (auto &conn : cell->connections()) {
+				if (!cell->input(conn.first))
+					continue;
+				for (auto bit : assign_map(conn.second)) {
+					if (!bit.wire || !is_private_wire(bit.wire))
+						continue;
+					if (queued.insert(bit).second)
+						queue.push_back(bit);
+				}
+			}
+		}
+	}
+	if (protected_cells)
+		log("Protecting %d cells driving (* nomerge *) wires in `%s'.\n",
+				protected_cells, module->name);
+}
+
 template <typename T>
 void initialize_queues(std::vector<ConcurrentQueue<T>> &queues, int size) {
 	queues.reserve(size);
@@ -370,6 +448,7 @@ struct OptMergeWorker
 		SigMap assign_map(module);
 		FfInitVals initvals;
 		initvals.set(&assign_map, module);
+		protect_nomerge_drivers(module, assign_map);
 
 		log("Finding identical cells in module `%s'.\n", module->name);
 
@@ -515,6 +594,11 @@ struct OptMergePass : public Pass {
 		log("\n");
 		log("This pass identifies cells with identical type and input signals. Such cells\n");
 		log("are then merged to one cell.\n");
+		log("\n");
+		log("Cells marked (* nomerge *) are left alone. A wire marked (* nomerge *),\n");
+		log("or a combinational process marked (* nomerge *), does the same for the\n");
+		log("private logic driving that wire. Absent or false attributes keep the\n");
+		log("default merge behaviour, including wires marked only (* keep *).\n");
 		log("\n");
 		log("    -nomux\n");
 		log("        Do not merge MUX cells.\n");

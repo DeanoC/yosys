@@ -436,6 +436,8 @@ struct proc_dlatch_db_t
 
 void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc, LatchPolicy policy)
 {
+	RTLIL::IdString nomerge = db.module->twines().find("\\nomerge");
+	bool proc_nomerge = nomerge != RTLIL::IdString() && proc->get_bool_attribute(nomerge);
 	RTLIL::SigSig latches_bits, nolatches_bits;
 	dict<SigBit, SigBit> latches_out_in;
 	dict<SigBit, int> latches_hold, latches_rst, latches_set;
@@ -521,6 +523,13 @@ void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc, LatchPolicy policy)
 			db.initvals.remove_init(bit);
 		}
 		db.module->connect(lhs, rhs);
+		// This connection replaces the combinational process. Copy nomerge
+		// onto the driven wire so opt_merge can see it after the process is gone.
+		if (proc_nomerge) {
+			for (auto bit : lhs)
+				if (bit.wire && !bit.wire->get_bool_attribute(nomerge))
+					bit.wire->set_bool_attribute(nomerge, true);
+		}
 		offset += chunk.width;
 	}
 

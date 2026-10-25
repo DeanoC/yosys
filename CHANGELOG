@@ -13,6 +13,9 @@ Yosys 0.70 .. Yosys 0.71-dev
  * Various
     - intel_alm: Infer initialized MLABs and dual-clock, byte-enable,
       mixed-width, and true dual-port M10K RAM; keep Cyclone V HPS I2C.
+    - opt_merge: (* nomerge *) on a wire, or on a combinational process,
+      keeps the private logic driving that wire from being merged.
+      Designs that do not use the attribute are unchanged.
 
 Yosys 0.69 .. Yosys 0.70
 --------------------------

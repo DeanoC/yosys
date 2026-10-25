@@ -1,9 +1,13 @@
 # Explicit opt_merge cell identity
 
-`(* nomerge = 1 *)` on a process propagates to its emitted FF. `opt_merge`
-excludes true-marked cells from duplicate matching on either side. Absent or
-false attributes retain existing behavior. This is narrower than `keep`:
-unused marked cells can still be removed. It is not a placement lock or timing
+`(* nomerge = 1 *)` on a process propagates to its emitted FF. On a
+combinational process it is copied onto the wires that process drives.
+`(* nomerge *)` on a wire covers the private logic driving that wire, so
+replicated cones stay distinct. Public nets and ports remain shared
+boundaries. `opt_merge` excludes true-marked cells from duplicate matching
+on either side. Absent or false attributes retain existing behavior, as
+does `(* keep *)` on a wire. This is narrower than `keep`: unused marked
+cells can still be removed. It is not a placement lock or timing
 exception, and does not disable constant-state simplification.
 
 The attribute name is looked up once on the design twine pool before workers
