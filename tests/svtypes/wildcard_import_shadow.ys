@@ -1,0 +1,3 @@
+read_verilog -sv wildcard_import_shadow.sv
+prep -top m
+check

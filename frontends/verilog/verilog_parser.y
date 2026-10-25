@@ -49,6 +49,7 @@
 	#include "kernel/yosys_common.h"
 	#include "frontends/verilog/verilog_error.h"
 	#include "frontends/verilog/verilog_location.h"
+	#include <set>
 	YOSYS_NAMESPACE_BEGIN
 	namespace VERILOG_FRONTEND {
 		struct ParseState;
@@ -74,6 +75,8 @@
 			std::stack<std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>>> attr_list_stack;
 			std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> albuf;
 			std::vector<UserTypeMap> user_type_stack;
+			std::vector<UserTypeMap> imported_type_stack;
+			std::vector<std::set<std::string>> local_decl_stack;
 			dict<std::string, AstNode*> pkg_user_types;
 			std::vector<AstNode*> ast_stack;
 			std::unique_ptr<AstNode> astbuf1, astbuf2, astbuf3;
@@ -85,6 +88,7 @@
 			std::vector<char> case_type_stack;
 			bool do_not_require_port_stubs;
 			bool current_wire_rand, current_wire_const, current_wire_automatic;
+			bool expecting_wire_name = false;
 			bool current_modport_input, current_modport_output;
 			bool default_nettype_wire = true;
 			std::istream* lexin;
@@ -94,8 +98,11 @@
 			void addWiretypeNode(std::string *name, AstNode* node);
 			void addTypedefNode(std::string *name, std::unique_ptr<AstNode> node);
 			void registerImportedPackageTypes(const AstNode *import_node);
+			void addLocalName(const std::string *name);
 			void enterTypeScope();
 			void exitTypeScope();
+			bool isUserType(const std::string &name);
+			bool isImportedType(const std::string &name);
 			bool isInLocalScope(const std::string *name);
 			void rewriteGenForDeclInit(AstNode *loop);
 			void ensureAsgnExprAllowed(const parser::location_type loc, bool sv_mode);
@@ -133,12 +140,19 @@
 			if (yyla.kind() == symbol_kind::S_TOK_ID) { \
 				auto &imported_id = yyla.value.as<string_t>(); \
 				if (imported_id) { \
-					bool known_type = false; \
-					for (auto it = extra->user_type_stack.rbegin(); it != extra->user_type_stack.rend() && !known_type; ++it) \
-						known_type = it->count(*imported_id) != 0; \
-					if (known_type) \
+					if (extra->isUserType(*imported_id)) \
 						yyla.kind_ = symbol_kind::S_TOK_USER_TYPE; \
 				} \
+			} \
+		} while (0)
+
+	#define YOSYS_PREPARE_IMPORTED_DECL_NAME_LOOKAHEAD() \
+		do { \
+			extra->expecting_wire_name = true; \
+			if (yyla.kind() == symbol_kind::S_TOK_USER_TYPE) { \
+				auto &decl_name = yyla.value.as<string_t>(); \
+				if (decl_name && extra->isImportedType(*decl_name)) \
+					yyla.kind_ = symbol_kind::S_TOK_ID; \
 			} \
 		} while (0)
 
@@ -285,6 +299,7 @@
 			tnode->str = *name;
 			auto &user_types = user_type_stack.back();
 			user_types[*name] = tnode;
+			imported_type_stack.back().erase(*name);
 			if (current_ast_mod && current_ast_mod->type == AST_PACKAGE) {
 				// typedef inside a package so we need the qualified name
 				auto qname = current_ast_mod->str + "::" + (*name).substr(1);
@@ -313,11 +328,19 @@
 				return;
 			std::string prefix = import_node->str + "::";
 			auto &user_types = user_type_stack.back();
+			auto &imported_types = imported_type_stack.back();
+			auto &local_decls = local_decl_stack.back();
+			auto register_type = [&](const std::string &name, AstNode *node) {
+				if (local_decls.count(name) || user_types.count(name))
+					return;
+				// Keep package imports separate so local declarations can mask them.
+				imported_types[name] = node;
+			};
 			if (import_node->children.empty()) {
 				for (auto &kv : pkg_user_types) {
 					if (kv.first.compare(0, prefix.size(), prefix) != 0)
 						continue;
-					user_types["\\" + kv.first.substr(prefix.size())] = kv.second;
+					register_type("\\" + kv.first.substr(prefix.size()), kv.second);
 				}
 			} else {
 				for (auto &item : import_node->children) {
@@ -325,19 +348,57 @@
 						continue;
 					auto it = pkg_user_types.find(prefix + item->str.substr(1));
 					if (it != pkg_user_types.end())
-						user_types[item->str] = it->second;
+						register_type(item->str, it->second);
 				}
 			}
+		}
+
+		void ParseState::addLocalName(const std::string *name)
+		{
+			if (name != nullptr && !local_decl_stack.empty())
+				local_decl_stack.back().insert(*name);
 		}
 
 		void ParseState::enterTypeScope()
 		{
 			user_type_stack.push_back(UserTypeMap());
+			imported_type_stack.push_back(UserTypeMap());
+			local_decl_stack.emplace_back();
 		}
 
 		void ParseState::exitTypeScope()
 		{
 			user_type_stack.pop_back();
+			imported_type_stack.pop_back();
+			local_decl_stack.pop_back();
+		}
+
+		bool ParseState::isUserType(const std::string &name)
+		{
+			for (size_t i = user_type_stack.size(); i > 0; i--) {
+				auto &user_types = user_type_stack[i - 1];
+				if (user_types.count(name))
+					return true;
+				if (local_decl_stack[i - 1].count(name))
+					return false;
+				if (imported_type_stack[i - 1].count(name))
+					return true;
+			}
+			return false;
+		}
+
+		bool ParseState::isImportedType(const std::string &name)
+		{
+			for (size_t i = user_type_stack.size(); i > 0; i--) {
+				auto &user_types = user_type_stack[i - 1];
+				if (user_types.count(name))
+					return false;
+				if (local_decl_stack[i - 1].count(name))
+					return false;
+				if (imported_type_stack[i - 1].count(name))
+					return true;
+			}
+			return false;
 		}
 
 		bool ParseState::isInLocalScope(const std::string *name)
@@ -821,6 +882,8 @@ module_arg_opt_assignment:
 
 module_arg:
 	TOK_ID {
+		extra->addLocalName($1.get());
+		extra->expecting_wire_name = false;
 		if (extra->ast_stack.back()->children.size() > 0 && extra->ast_stack.back()->children.back()->type == AST_WIRE) {
 			auto node = extra->ast_stack.back()->children.back()->clone();
 			node->str = *$1;
@@ -844,6 +907,8 @@ module_arg:
 		extra->astbuf2->str = *$3;
 		extra->astbuf2->port_id = ++extra->port_counter;
 		extra->ast_stack.back()->children.push_back(std::move(extra->astbuf2));
+		extra->addLocalName($3.get());
+		extra->expecting_wire_name = false;
 	} module_arg_opt_assignment |
 	attr wire_type range_or_multirange TOK_ID {
 		auto node = std::move($2);
@@ -859,6 +924,8 @@ module_arg:
 			err_at_loc(@4, "Input port `%s' is declared as register.", *$4);
 		append_attr(node.get(), std::move($1));
 		extra->ast_stack.back()->children.push_back(std::move(node));
+		extra->addLocalName($4.get());
+		extra->expecting_wire_name = false;
 	} module_arg_opt_assignment |
 	TOK_DOT TOK_DOT TOK_DOT {
 		extra->do_not_require_port_stubs = true;
@@ -1065,13 +1132,16 @@ wire_type_token:
 	net_type {
 	} |
 	net_type logic_type {
+		extra->expecting_wire_name = true;
 	} |
 	// regs
 	TOK_REG {
 		extra->astbuf3->is_reg = true;
+		extra->expecting_wire_name = true;
 	} |
 	TOK_VAR TOK_REG {
 		extra->astbuf3->is_reg = true;
+		extra->expecting_wire_name = true;
 	} |
 	// logics
 	TOK_VAR {
@@ -1079,9 +1149,11 @@ wire_type_token:
 	} |
 	TOK_VAR logic_type {
 		extra->astbuf3->is_logic = true;
+		extra->expecting_wire_name = true;
 	} |
 	logic_type {
 		extra->astbuf3->is_logic = true;
+		extra->expecting_wire_name = true;
 	} |
 	TOK_GENVAR {
 		extra->astbuf3->type = AST_GENVAR;
@@ -1089,6 +1161,7 @@ wire_type_token:
 		extra->astbuf3->is_signed = true;
 		extra->astbuf3->range_left = 31;
 		extra->astbuf3->range_right = 0;
+		extra->expecting_wire_name = true;
 	};
 
 net_type:
@@ -2149,7 +2222,8 @@ opt_supply_wires:
 	};
 
 wire_name_list:
-	wire_name_and_opt_assign | wire_name_list TOK_COMMA wire_name_and_opt_assign;
+	wire_name_and_opt_assign |
+	wire_name_list TOK_COMMA { YOSYS_PREPARE_IMPORTED_DECL_NAME_LOOKAHEAD(); } wire_name_and_opt_assign;
 
 wire_name_and_opt_assign:
 	wire_name {
@@ -2256,6 +2330,8 @@ wire_name:
 		//FIXME: for some reason, TOK_ID has a location which always points to one column *after* the real last column...
 		SET_AST_NODE_LOC(node.get(), @1, @1);
 		extra->ast_stack.back()->children.push_back(std::move(node));
+		extra->addLocalName($1.get());
+		extra->expecting_wire_name = false;
 
 	};
 
