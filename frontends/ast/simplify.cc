@@ -2159,6 +2159,15 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 				newNode->is_input = this->is_input;
 				newNode->is_output = this->is_output;
 				current_scope[str] = this;
+				// Packed array of structs: `e_t [15:0] arr`. make_packed_struct()
+				// only builds one element; the array dimensions are children[1].
+				if (type == AST_WIRE && GetSize(children) > 1) {
+					prepend_ranges(newNode->children[0], children[1].get());
+					newNode->dimensions.clear();
+					newNode->unpacked_dimensions = 0;
+					newNode->basic_prep = false;
+					newNode->range_valid = false;
+				}
 				goto apply_newNode;
 			}
 
