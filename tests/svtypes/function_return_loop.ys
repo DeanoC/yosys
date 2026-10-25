@@ -1,0 +1,9 @@
+logger -expect error "return inside a loop is not supported" 1
+read_verilog -sv <<EOT
+module top;
+	function automatic logic [3:0] f(input logic [3:0] x);
+		for (integer i = 0; i < 2; i = i + 1)
+			return x;
+	endfunction
+endmodule
+EOT
