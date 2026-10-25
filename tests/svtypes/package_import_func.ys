@@ -1,0 +1,43 @@
+read_verilog -sv package_import_func.sv
+# The call is lowered to a process. proc promotes that to a connection eval can see.
+proc
+
+select hdr_call
+logger -expect log "Eval result: \\y = 1'1\." 1
+eval -set b 8'h03 -show y
+logger -check-expected
+logger -expect log "Eval result: \\y = 1'0\." 1
+eval -set b 8'h02 -show y
+logger -check-expected
+
+select body_call
+logger -expect log "Eval result: \\y = 1'1\." 1
+eval -set b 8'h03 -show y
+logger -check-expected
+logger -expect log "Eval result: \\y = 1'0\." 1
+eval -set b 8'h02 -show y
+logger -check-expected
+
+select gen_call
+logger -expect log "Eval result: \\y = 8'00000011\." 1
+eval -set b 8'h03 -show y
+logger -check-expected
+logger -expect log "Eval result: \\y = 8'00000010\." 1
+eval -set b 8'h02 -show y
+logger -check-expected
+
+select qual_call
+logger -expect log "Eval result: \\y = 1'1\." 1
+eval -set b 8'h03 -show y
+logger -check-expected
+logger -expect log "Eval result: \\y = 1'0\." 1
+eval -set b 8'h02 -show y
+logger -check-expected
+
+select spec_call
+logger -expect log "Eval result: \\y = 1'1\." 1
+eval -set b 8'h03 -show y
+logger -check-expected
+logger -expect log "Eval result: \\y = 1'0\." 1
+eval -set b 8'h02 -show y
+logger -check-expected
