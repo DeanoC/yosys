@@ -505,6 +505,18 @@ static std::unique_ptr<AstNode> multiply_by_const(std::unique_ptr<AstNode> expr_
 	return std::make_unique<AstNode>(loc, AST_MUL, std::move(expr_node), node_int(loc, stride));
 }
 
+static RTLIL::IdString struct_array_member_attr()
+{
+	static RTLIL::IdString attr = intern_attr_name("\\sv_struct_array_member");
+	return attr;
+}
+
+static RTLIL::IdString struct_array_member_width_attr()
+{
+	static RTLIL::IdString attr = intern_attr_name("\\sv_struct_array_member_width");
+	return attr;
+}
+
 static std::unique_ptr<AstNode> normalize_index(AstNode *expr, AstNode *decl_node, int dimension)
 {
 	auto new_expr = expr->clone();
@@ -1112,37 +1124,98 @@ static std::unique_ptr<AstNode> struct_array_field_select(AstNode *prefix)
 
 	int rel_lsb = 0;
 	int rel_width = member->range_left - member->range_right + 1;
+	int rel_left = rel_width - 1;
+	int rel_right = 0;
+	std::unique_ptr<AstNode> rel_lsb_expr;
+	bool dynamic_bit_select = false;
+	bool explicit_member_select = !prefix->children[1]->children.empty();
 	if (!prefix->children[1]->children.empty()) {
 		auto rel = prefix->children[1]->make_index_range(member);
 		while (rel->simplify(true, 1, -1, false)) { }
-		if (!rel->range_valid)
+		if (rel->range_valid) {
+			rel_left = rel->range_swapped ? rel->range_right : rel->range_left;
+			rel_right = rel->range_swapped ? rel->range_left : rel->range_right;
+			rel_lsb = rel_right;
+			rel_width = std::abs(rel_left - rel_right) + 1;
+			rel_lsb_expr = node_int(loc, rel_lsb);
+		} else if (prefix->children[1]->children[0]->type == AST_RANGE &&
+				prefix->children[1]->children[0]->children.size() == 1) {
+			// A variable bit index is still a one-bit select. Keep its normalized
+			// offset expression so it can be applied to the flattened array.
+			rel_lsb_expr = rel->children.back()->clone();
+			rel_width = 1;
+			dynamic_bit_select = true;
+		} else {
 			prefix->input_error("Non-constant bit select in member `%s' of `%s'\n", field, prefix->str);
-		rel_lsb = rel->range_right;
-		rel_width = rel->range_left - rel->range_right + 1;
+		}
 	}
 	if (rel_width < 1)
 		prefix->input_error("Member `%s' of `%s' has no packed width\n", field, prefix->str);
 
-	int base = member->range_right + rel_lsb;
+	int member_width = member->range_left - member->range_right + 1;
+	bool member_select_oob = explicit_member_select && !dynamic_bit_select &&
+		(std::min(rel_left, rel_right) < 0 || std::max(rel_left, rel_right) >= member_width);
+	if (member_select_oob) {
+		// Preserve the declared select width and order while replacing each
+		// out-of-member bit with X (or an unobservable sink on the LHS).
+		auto selected_bits = std::make_unique<AstNode>(loc, AST_CONCAT);
+		int step = rel_left <= rel_right ? -1 : 1;
+		for (int bit = rel_right;; bit += step) {
+			std::unique_ptr<AstNode> selected_bit;
+			if (bit < 0 || bit >= member_width) {
+				if (prefix->in_lvalue)
+					selected_bit = prefix->mktemp_logic(loc, "$struct_array_oob$", current_ast_mod, true, 0, 0, false);
+				else
+					selected_bit = AstNode::mkconst_bits(loc, std::vector<RTLIL::State>{RTLIL::State::Sx}, false);
+			} else {
+				auto bit_index = index->clone();
+				int bit_offset = member->range_right + bit;
+				if (bit_offset)
+					bit_index = std::make_unique<AstNode>(loc, AST_ADD, std::move(bit_index), node_int(loc, bit_offset));
+				auto bit_range = std::make_unique<AstNode>(loc, AST_RANGE, std::move(bit_index));
+				selected_bit = std::make_unique<AstNode>(loc, AST_IDENTIFIER, std::move(bit_range));
+				selected_bit->str = prefix->str;
+				selected_bit->id2ast = wire;
+				selected_bit->basic_prep = true;
+			}
+			selected_bits->children.push_back(std::move(selected_bit));
+			if (bit == rel_left)
+				break;
+		}
+		if (selected_bits->children.size() == 1)
+			return std::move(selected_bits->children[0]);
+		return selected_bits;
+	}
+
+	// Member-relative indices become absolute offsets in the flattened wire.
+	int base = member->range_right;
 	if (base)
 		index = std::make_unique<AstNode>(loc, AST_ADD, std::move(index), node_int(loc, base));
+	if (rel_lsb_expr)
+		index = std::make_unique<AstNode>(loc, AST_ADD, std::move(index), std::move(rel_lsb_expr));
 
 	std::unique_ptr<AstNode> range;
 	if (rel_width == 1) {
 		range = std::make_unique<AstNode>(loc, AST_RANGE, std::move(index));
 	} else {
-		auto msb = std::make_unique<AstNode>(loc, AST_ADD, index->clone(), node_int(loc, rel_width - 1));
+		int delta = rel_left - rel_right;
+		auto msb = delta == 0 ? index->clone() :
+			std::make_unique<AstNode>(loc, AST_ADD, index->clone(), node_int(loc, delta));
 		range = std::make_unique<AstNode>(loc, AST_RANGE, std::move(msb), std::move(index));
 	}
 
 	auto ident = std::make_unique<AstNode>(loc, AST_IDENTIFIER, std::move(range));
 	ident->str = prefix->str;
 	ident->id2ast = wire;
+	ident->integer = 0;
+	ident->set_attribute(struct_array_member_attr(), member->clone());
+	if (explicit_member_select)
+		ident->set_attribute(struct_array_member_width_attr(), AstNode::mkconst_int(loc, rel_width, true));
 	// The range is already a bit/part select of the flattened wire. Leaving
 	// basic_prep clear would run it through the multidimensional flattener,
 	// which treats that select as an index into the array dimension.
 	ident->basic_prep = true;
-	if (member->is_signed)
+	if (member->is_signed && !explicit_member_select)
 		ident = std::make_unique<AstNode>(loc, AST_TO_SIGNED, std::move(ident));
 	return ident;
 }
@@ -4143,9 +4216,19 @@ skip_dynamic_range_lvalue_expansion:;
 					if (!id_ast)
 						input_error("Failed to resolve identifier %s for width detection!\n", buf->str);
 
-					if (id_ast->type == AST_WIRE || id_ast->type == AST_MEMORY) {
+					auto member_select_width = buf->attributes.find(struct_array_member_width_attr());
+					if (member_select_width != buf->attributes.end()) {
+						// Explicit member bit/part selects already have a packed result
+						// width, independent of the member's declared dimensions.
+						width = member_select_width->second->asInt(false);
+						left = high = width - 1;
+						right = low = 0;
+						expr_dimensions = 1;
+					} else if (id_ast->type == AST_WIRE || id_ast->type == AST_MEMORY) {
 						// Check for item in packed struct / union
 						AstNode *item_node = buf->get_struct_member();
+						if (!item_node && buf->attributes.count(struct_array_member_attr()))
+							item_node = buf->attributes.at(struct_array_member_attr()).get();
 						if (item_node)
 							id_ast = item_node;
 
