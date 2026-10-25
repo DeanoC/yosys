@@ -1,0 +1,106 @@
+read_verilog lut_adder.v
+design -save read
+
+# Default mapping: the 5-bit issue repro is five carry-chain cells.
+hierarchy -top top
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf
+design -load postopt
+cd top
+select -assert-count 5 t:MISTRAL_ALUT_ARITH
+select -assert-none t:MISTRAL_ALUT_ARITH %% t:* %D
+
+# -lutadders 4 is below the result width, so the carry chain stays.
+design -load read
+hierarchy -top top
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf -lutadders 4
+design -load postopt
+cd top
+select -assert-count 5 t:MISTRAL_ALUT_ARITH
+select -assert-none t:MISTRAL_ALUT_ARITH %% t:* %D
+
+# -lutadders 5 is the widest result built from LUTs. No carry cells.
+design -load read
+hierarchy -top top
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf -lutadders 5
+design -load postopt
+cd top
+select -assert-count 1 t:MISTRAL_ALUT2
+select -assert-count 1 t:MISTRAL_ALUT3
+select -assert-count 1 t:MISTRAL_ALUT4
+select -assert-count 1 t:MISTRAL_ALUT5
+select -assert-count 2 t:MISTRAL_ALUT6
+select -assert-none t:MISTRAL_ALUT2 t:MISTRAL_ALUT3 t:MISTRAL_ALUT4 t:MISTRAL_ALUT5 t:MISTRAL_ALUT6 %% t:* %D
+
+# A 5-bit subtract follows the same threshold.
+design -load read
+hierarchy -top narrow_sub
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf
+design -load postopt
+cd narrow_sub
+select -assert-count 6 t:MISTRAL_ALUT_ARITH
+select -assert-none t:MISTRAL_ALUT_ARITH %% t:* %D
+
+design -load read
+hierarchy -top narrow_sub
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf -lutadders 5
+design -load postopt
+cd narrow_sub
+select -assert-none t:MISTRAL_ALUT_ARITH
+
+# 16-bit add stays on the carry chain when the threshold is 5.
+design -load read
+hierarchy -top wide_add
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf -lutadders 5
+design -load postopt
+cd wide_add
+select -assert-count 16 t:MISTRAL_ALUT_ARITH
+select -assert-none t:MISTRAL_ALUT_ARITH %% t:* %D
+
+# Narrow and wide adders in one module take different mappings.
+design -load read
+hierarchy -top mixed
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf -lutadders 5
+design -load postopt
+cd mixed
+select -assert-count 16 t:MISTRAL_ALUT_ARITH
+
+# (* no_carry *) maps an 8-bit add to LUTs even at the default threshold.
+design -load read
+hierarchy -top attr_soft
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf
+design -load postopt
+cd attr_soft
+select -assert-none t:MISTRAL_ALUT_ARITH
+
+# (* use_carry *) keeps the chain even when -lutadders covers the width.
+design -load read
+hierarchy -top attr_carry
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf -lutadders 5
+design -load postopt
+cd attr_carry
+select -assert-count 5 t:MISTRAL_ALUT_ARITH
+select -assert-none t:MISTRAL_ALUT_ARITH %% t:* %D
+
+# An annotated term stays separate when alumacc would otherwise merge the sum.
+design -load read
+hierarchy -top macc_use_carry
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf -lutadders 8
+design -load postopt
+cd macc_use_carry
+select -assert-count 8 t:MISTRAL_ALUT_ARITH
+
+# The same attribute on the result wire.
+design -load read
+hierarchy -top wire_soft
+equiv_opt -assert -map +/intel_alm/common/alm_sim.v synth_intel_alm -family cyclonev -nolutram -nodsp -noiopad -noclkbuf
+design -load postopt
+cd wire_soft
+select -assert-none t:MISTRAL_ALUT_ARITH
+
+# Result-wire attributes are captured before iopadmap moves the port net.
+design -load read
+hierarchy -top wire_soft
+synth_intel_alm -family cyclonev -nolutram -nodsp -noclkbuf
+cd wire_soft
+select -assert-none t:MISTRAL_ALUT_ARITH
+select -assert-count 8 t:MISTRAL_OB

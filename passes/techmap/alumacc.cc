@@ -283,6 +283,11 @@ struct AlumaccWorker
 						continue;
 
 					auto other_n = sig_macc.at(port.in_a);
+					// Keep annotated additions as separate $alu candidates so their
+					// mapping choice is not lost when a sum becomes a multi-term $macc.
+					if (n->cell->get_bool_attribute(ID(no_carry)) || n->cell->get_bool_attribute(ID(use_carry)) ||
+						other_n->cell->get_bool_attribute(ID(no_carry)) || other_n->cell->get_bool_attribute(ID(use_carry)))
+						continue;
 
 					if (other_n->users > 1 || other_n->cell->has_keep_attr())
 						continue;
@@ -585,6 +590,13 @@ struct AlumaccWorker
 
 			if (n->cells.size() > 0)
 				n->alu_cell->set_src_attribute(n->cells[0]->get_src_attribute());
+			// synth_intel_alm uses these to choose LUTs over a carry chain.
+			for (auto c : n->cells) {
+				if (c->get_bool_attribute(ID(no_carry)))
+					n->alu_cell->set_bool_attribute(ID(no_carry));
+				if (c->get_bool_attribute(ID(use_carry)))
+					n->alu_cell->set_bool_attribute(ID(use_carry));
+			}
 
 			n->alu_cell->setPort(ID::A, n->a);
 			n->alu_cell->setPort(ID::B, n->b);
