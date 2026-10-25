@@ -538,6 +538,19 @@
 				local_decl_stack.back().insert(*name);
 		}
 
+		static bool promoteImportedNetTypeToName(ParseState *extra, AstNode *node)
+		{
+			if (!node || !node->is_custom_type || node->children.empty())
+				return false;
+			const std::string &name = node->children.back()->str;
+			if (!extra->isImportedType(name))
+				return false;
+			node->str = name;
+			node->children.clear();
+			node->is_custom_type = false;
+			return true;
+		}
+
 		void ParseState::enterTypeScope()
 		{
 			user_type_stack.push_back(UserTypeMap());
@@ -1105,6 +1118,24 @@ module_arg:
 		extra->ast_stack.back()->children.push_back(std::move(node));
 		extra->addLocalName($4.get());
 		extra->expecting_wire_name = false;
+	} module_arg_opt_assignment |
+	attr wire_type range_or_multirange {
+		auto node = std::move($2);
+		if (!promoteImportedNetTypeToName(extra, node.get()))
+			err_at_loc(@$, "Expected a declarator name after net type.");
+		auto range = checkRange(node.get(), std::move($3));
+		if (range != nullptr)
+			node->children.push_back(std::move(range));
+		if (!node->is_input && !node->is_output)
+			err_at_loc(@$, "Module port is neither input nor output.");
+		if (node->is_reg && node->is_input && !node->is_output && !mode->sv)
+			err_at_loc(@$, "Input port is declared as register.");
+		SET_AST_NODE_LOC(node.get(), @2, @2);
+		node->port_id = ++extra->port_counter;
+		append_attr(node.get(), std::move($1));
+		extra->addLocalName(&node->str);
+		extra->expecting_wire_name = false;
+		extra->ast_stack.back()->children.push_back(std::move(node));
 	} module_arg_opt_assignment |
 	TOK_DOT TOK_DOT TOK_DOT {
 		extra->do_not_require_port_stubs = true;
@@ -2405,7 +2436,18 @@ opt_supply_wires:
 
 wire_name_list:
 	wire_name_and_opt_assign |
-	wire_name_list TOK_COMMA { YOSYS_PREPARE_IMPORTED_DECL_NAME_LOOKAHEAD(); } wire_name_and_opt_assign;
+	wire_name_list TOK_COMMA { YOSYS_PREPARE_IMPORTED_DECL_NAME_LOOKAHEAD(); } wire_name_and_opt_assign |
+	%empty {
+		auto node = extra->astbuf1->clone();
+		if (!promoteImportedNetTypeToName(extra, node.get()))
+			err_at_loc(@$, "Expected a declarator name after net type.");
+		append_attr_clone(node.get(), extra->albuf);
+		if (extra->astbuf2 != nullptr)
+			node->children.push_back(extra->astbuf2->clone());
+		extra->addLocalName(&node->str);
+		extra->ast_stack.back()->children.push_back(std::move(node));
+		extra->expecting_wire_name = false;
+	};
 
 wire_name_and_opt_assign:
 	wire_name {
