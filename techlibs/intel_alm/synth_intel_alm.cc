@@ -24,6 +24,8 @@
 #include "kernel/rtlil.h"
 #include "kernel/sigtools.h"
 
+#include <climits>
+
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
@@ -610,6 +612,88 @@ void tie_m10k_rom_clock(RTLIL::Design *design)
 	}
 }
 
+// arith_alm_map.v turns every $alu into a MISTRAL_ALUT_ARITH chain. Adders
+// that should be LUTs are hidden from that rule and restored afterwards, so
+// the generic techmap in map_ffs lowers them to gates for ABC. Wider adders
+// stay $alu and keep the carry-chain mapping.
+void capture_lut_adder_wire_attributes(RTLIL::Design *design)
+{
+	for (auto module : design->selected_modules()) {
+		if (module->get_blackbox_attribute())
+			continue;
+		SigMap sigmap(module);
+		pool<RTLIL::SigBit> no_carry_signals, use_carry_signals;
+		for (auto wire : module->wires()) {
+			if (!wire->get_bool_attribute(ID(no_carry)) && !wire->get_bool_attribute(ID(use_carry)))
+				continue;
+			for (auto bit : sigmap(wire)) {
+				if (wire->get_bool_attribute(ID(no_carry)))
+					no_carry_signals.insert(bit);
+				if (wire->get_bool_attribute(ID(use_carry)))
+					use_carry_signals.insert(bit);
+			}
+		}
+		for (auto cell : module->selected_cells()) {
+			if (!cell->type.in(ID($pos), ID($neg), ID($add), ID($sub), ID($alu)))
+				continue;
+			for (auto bit : sigmap(cell->getPort(ID::Y))) {
+				if (no_carry_signals.count(bit))
+					cell->set_bool_attribute(ID(no_carry));
+				if (use_carry_signals.count(bit))
+					cell->set_bool_attribute(ID(use_carry));
+			}
+		}
+	}
+}
+
+void defer_lut_adders(RTLIL::Design *design, int maxwidth)
+{
+	for (auto module : design->selected_modules()) {
+		if (module->get_blackbox_attribute())
+			continue;
+		for (auto cell : module->selected_cells()) {
+			if (cell->type != ID($alu))
+				continue;
+			bool no_carry = cell->get_bool_attribute(ID(no_carry));
+			bool use_carry = cell->get_bool_attribute(ID(use_carry));
+			if (no_carry && use_carry)
+				log_error("Adder %s.%s has both no_carry and use_carry set.\n", module, cell);
+			int width = cell->getParam(ID::Y_WIDTH).as_int();
+			bool lut = no_carry || (!use_carry && width <= maxwidth);
+			if (!lut)
+				continue;
+			log("Building %d-bit adder %s.%s from LUTs.\n", width, module, cell);
+			cell->type = ID($__soft_alu);
+		}
+	}
+}
+
+void restore_lut_adders(RTLIL::Design *design)
+{
+	for (auto module : design->selected_modules()) {
+		if (module->get_blackbox_attribute())
+			continue;
+		for (auto cell : module->selected_cells())
+			if (cell->type == ID($__soft_alu))
+				cell->type = ID($alu);
+	}
+}
+
+int parse_lutadder_width(const std::string &value)
+{
+	if (value.empty())
+		log_cmd_error("`-lutadders' expects a non-negative integer.\n");
+	int parsed = 0;
+	for (char c : value) {
+		if (c < '0' || c > '9')
+			log_cmd_error("`-lutadders' expects a non-negative integer, got `%s'.\n", value);
+		if (parsed > (INT_MAX - (c - '0')) / 10)
+			log_cmd_error("`-lutadders' width `%s' is out of range.\n", value);
+		parsed = parsed * 10 + (c - '0');
+	}
+	return parsed;
+}
+
 struct SynthIntelALMPass : public ScriptPass {
 	SynthIntelALMPass() : ScriptPass("synth_intel_alm", "synthesis for ALM-based Intel (Altera) FPGAs.") {}
 
@@ -675,6 +759,17 @@ struct SynthIntelALMPass : public ScriptPass {
 		log("    -noclkbuf\n");
 		log("        do not insert global clock buffers\n");
 		log("\n");
+		log("    -lutadders <maxwidth>\n");
+		log("        build adders, subtractors and ALUs whose result is at\n");
+		log("        most <maxwidth> bits wide from LUTs instead of ALM carry\n");
+		log("        chains. Wider arithmetic keeps the MISTRAL_ALUT_ARITH\n");
+		log("        mapping. The default is 0, so every adder uses a carry\n");
+		log("        chain. The operator attribute `(* no_carry *)` forces\n");
+		log("        LUTs, and `(* use_carry *)` forces the carry chain:\n");
+		log("        assign y = a + (* no_carry *) b. The same attributes may\n");
+		log("        be set on the result wire or on a $alu cell. Setting\n");
+		log("        both is an error.\n");
+		log("\n");
 		log("The following commands are executed by this synthesis command:\n");
 		help_script();
 		log("\n");
@@ -682,6 +777,7 @@ struct SynthIntelALMPass : public ScriptPass {
 
 	string top_opt, family_opt, bram_type;
 	bool flatten, nolutram, nobram, dff, nodsp, noiopad, noclkbuf;
+	int lutadder_maxwidth;
 
 	void clear_flags() override
 	{
@@ -695,6 +791,7 @@ struct SynthIntelALMPass : public ScriptPass {
 		nodsp = false;
 		noiopad = false;
 		noclkbuf = false;
+		lutadder_maxwidth = 0;
 	}
 
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -746,6 +843,10 @@ struct SynthIntelALMPass : public ScriptPass {
 			}
 			if (args[argidx] == "-noclkbuf") {
 				noclkbuf = true;
+				continue;
+			}
+			if (args[argidx] == "-lutadders" && argidx + 1 < args.size()) {
+				lutadder_maxwidth = parse_lutadder_width(args[++argidx]);
 				continue;
 			}
 			break;
@@ -852,6 +953,8 @@ struct SynthIntelALMPass : public ScriptPass {
 				run("techmap -map +/mul2dsp.v -D DSP_A_MAXWIDTH=9 -D DSP_B_MAXWIDTH=9  -D DSP_A_MINWIDTH=4 -D DSP_B_MINWIDTH=4 -D DSP_NAME=__MUL9X9");
 				run("chtype -set $mul t:$__soft_mul");
 			}
+			if (!help_mode)
+				capture_lut_adder_wire_attributes(active_design);
 			run("alumacc");
 			if (!noiopad) {
 				// iopadmap merges only fine-grained $_TBUF_ cells, so lower the
@@ -876,7 +979,11 @@ struct SynthIntelALMPass : public ScriptPass {
 				if (!help_mode)
 					restore_promoted_tristate_outputs(promoted_tristate);
 			}
+			if (!help_mode)
+				defer_lut_adders(active_design, lutadder_maxwidth);
 			run("techmap -map +/intel_alm/common/arith_alm_map.v -map +/intel_alm/common/dsp_map.v");
+			if (!help_mode)
+				restore_lut_adders(active_design);
 			run("opt");
 			run("memory -nomap");
 			run("opt_clean");
