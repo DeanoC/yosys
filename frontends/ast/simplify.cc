@@ -1069,6 +1069,82 @@ public:
 	}
 };
 
+// `arr[i].field` is parsed as a generate-block prefix. When arr is a packed
+// array of packed structs, rewrite it to a part select of the flattened wire.
+// Returns nullptr when the prefix really is a generate-block reference.
+static std::unique_ptr<AstNode> struct_array_field_select(AstNode *prefix)
+{
+	if (prefix->children.size() < 2 || prefix->children[1]->type != AST_IDENTIFIER)
+		return nullptr;
+	if (!current_scope.count(prefix->str))
+		return nullptr;
+	AstNode *wire = current_scope.at(prefix->str);
+	if (wire->type != AST_WIRE && wire->type != AST_PARAMETER && wire->type != AST_LOCALPARAM)
+		return nullptr;
+
+	std::string field = prefix->children[1]->str;
+	if (!field.empty() && field[0] == '\\')
+		field = field.substr(1);
+	std::string key = prefix->str + "." + field;
+	if (!current_scope.count(key))
+		return nullptr;
+	AstNode *member = current_scope.at(key);
+	if (member->type != AST_STRUCT_ITEM && member->type != AST_STRUCT && member->type != AST_UNION)
+		return nullptr;
+	if (!member->range_valid)
+		return nullptr;
+
+	if (wire->type == AST_WIRE && wire->dimensions.empty())
+		while (wire->simplify(true, 1, -1, false)) { }
+	// One array dimension plus the struct element. A single struct has only the
+	// element dimension and is not this form. More array dimensions do not put
+	// one member in a contiguous slice.
+	if (GetSize(wire->dimensions) < 2)
+		return nullptr;
+	if (GetSize(wire->dimensions) != 2)
+		prefix->input_error("Member select on multidimensional packed array `%s' is not supported\n", prefix->str);
+
+	auto loc = prefix->location;
+	auto index = normalize_index(prefix->children[0].get(), wire, 0);
+	int stride = wire->dimensions[1].range_width;
+	if (stride != 1)
+		index = multiply_by_const(std::move(index), stride);
+
+	int rel_lsb = 0;
+	int rel_width = member->range_left - member->range_right + 1;
+	if (!prefix->children[1]->children.empty()) {
+		auto rel = prefix->children[1]->make_index_range(member);
+		while (rel->simplify(true, 1, -1, false)) { }
+		if (!rel->range_valid)
+			prefix->input_error("Non-constant bit select in member `%s' of `%s'\n", field, prefix->str);
+		rel_lsb = rel->range_right;
+		rel_width = rel->range_left - rel->range_right + 1;
+	}
+	if (rel_width < 1)
+		prefix->input_error("Member `%s' of `%s' has no packed width\n", field, prefix->str);
+
+	int base = member->range_right + rel_lsb;
+	if (base)
+		index = std::make_unique<AstNode>(loc, AST_ADD, std::move(index), node_int(loc, base));
+
+	std::unique_ptr<AstNode> range;
+	if (rel_width == 1) {
+		range = std::make_unique<AstNode>(loc, AST_RANGE, std::move(index));
+	} else {
+		auto msb = std::make_unique<AstNode>(loc, AST_ADD, index->clone(), node_int(loc, rel_width - 1));
+		range = std::make_unique<AstNode>(loc, AST_RANGE, std::move(msb), std::move(index));
+	}
+
+	auto ident = std::make_unique<AstNode>(loc, AST_IDENTIFIER, std::move(range));
+	ident->str = prefix->str;
+	ident->id2ast = wire;
+	// The range is already a bit/part select of the flattened wire. Leaving
+	// basic_prep clear would run it through the multidimensional flattener,
+	// which treats that select as an index into the array dimension.
+	ident->basic_prep = true;
+	return ident;
+}
+
 // convert the AST into a simpler AST that has all parameters substituted by their
 // values, unrolled for-loops, expanded generate blocks, etc. when this function
 // is done with an AST it can be converted into RTLIL using genRTLIL().
@@ -2243,6 +2319,10 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 
 	// resolve constant prefixes
 	if (type == AST_PREFIX) {
+		if (auto field_sel = struct_array_field_select(this)) {
+			newNode = std::move(field_sel);
+			goto apply_newNode;
+		}
 		if (children[0]->type != AST_CONSTANT) {
 			// dumpAst(nullptr, ">   ");
 			input_error("Index in generate block prefix syntax is not constant!\n");
