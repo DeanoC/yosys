@@ -1081,6 +1081,11 @@ static RTLIL::IdString pattern_default_attr()
 	return intern_attr_name("\\pattern_default");
 }
 
+static RTLIL::IdString pattern_index_attr()
+{
+	return intern_attr_name("\\pattern_index");
+}
+
 static bool assignment_pattern_is_named(AstNode *pattern)
 {
 	if (pattern->type != AST_ASSIGN_PATTERN)
@@ -1216,6 +1221,7 @@ static std::unique_ptr<AstNode> pattern_element_value(AstNode *elem, AstNode *me
 	auto value = elem->clone();
 	value->attributes.erase(pattern_member_attr());
 	value->attributes.erase(pattern_default_attr());
+	value->attributes.erase(pattern_index_attr());
 	if (value->type == AST_ASSIGN_PATTERN) {
 		if (member->type != AST_STRUCT && member->type != AST_UNION)
 			elem->input_error("Assignment pattern member '%s' is not a struct or union\n", member->str);
@@ -3722,6 +3728,10 @@ skip_dynamic_range_lvalue_expansion:;
 		bool pattern_is_default = is_pattern_assign && rhs->children.size() == 1 &&
 			rhs->children[0]->attributes.count(pattern_default_attr()) != 0 &&
 			rhs->children[0]->attributes.count(pattern_member_attr()) == 0;
+		bool pattern_has_index = false;
+		if (is_pattern_assign)
+			for (auto &child : rhs->children)
+				pattern_has_index |= child->attributes.count(pattern_index_attr()) != 0;
 
 		if (is_direct_assign || is_ternary_assign || is_pattern_assign)
 		{
@@ -3736,6 +3746,9 @@ skip_dynamic_range_lvalue_expansion:;
 			int element_width, mem_size, addr_bits;
 			lhs_mem->meminfo(element_width, mem_size, addr_bits);
 			bool pattern_is_flat = false;
+			bool pattern_is_keyed = false;
+			AstNode *pattern_default_element = nullptr;
+			std::vector<AstNode*> keyed_pattern_elements;
 
 			// Helper to add indices to an array identifier clone.
 			auto add_indices_to_id = [&](std::unique_ptr<AstNode> id, const std::vector<int>& indices) {
@@ -3792,6 +3805,7 @@ skip_dynamic_range_lvalue_expansion:;
 				auto value = element->clone();
 				value->attributes.erase(pattern_member_attr());
 				value->attributes.erase(pattern_default_attr());
+				value->attributes.erase(pattern_index_attr());
 				return value;
 			};
 			auto pattern_element_at_position = [&](const std::vector<int>& position, int flat_index) {
@@ -3799,6 +3813,13 @@ skip_dynamic_range_lvalue_expansion:;
 					return clone_pattern_value(rhs->children[0].get());
 				if (pattern_is_flat)
 					return clone_pattern_value(rhs->children[flat_index].get());
+				if (pattern_is_keyed) {
+					AstNode *element = keyed_pattern_elements[position[0]];
+					if (!element)
+						element = pattern_default_element;
+					log_assert(element != nullptr);
+					return clone_pattern_value(element);
+				}
 
 				AstNode *pattern = rhs;
 				for (int d = 0; d < num_dims; d++) {
@@ -3832,6 +3853,51 @@ skip_dynamic_range_lvalue_expansion:;
 			} else {
 				if (pattern_is_default) {
 					// A default assignment pattern supplies the same value to every element.
+				} else if (pattern_has_index) {
+					if (num_dims != 1)
+						input_error("Indexed assignment patterns for unpacked arrays currently require one dimension\n");
+
+					pattern_is_keyed = true;
+					keyed_pattern_elements.resize(total_elements);
+					bool has_positional_element = false;
+					for (auto &child : rhs->children) {
+						if (child->attributes.count(pattern_default_attr())) {
+							if (pattern_default_element)
+								child->input_error("Indexed assignment pattern has multiple defaults\n");
+							pattern_default_element = child.get();
+						} else if (child->attributes.count(pattern_index_attr()) == 0) {
+							has_positional_element = true;
+						}
+					}
+					if (has_positional_element)
+						input_error("Assignment pattern mixes positional and indexed elements\n");
+
+					for (auto &child : rhs->children) {
+						if (child->attributes.count(pattern_default_attr()))
+							continue;
+						auto key = child->attributes.find(pattern_index_attr());
+						log_assert(key != child->attributes.end() && key->second);
+						if (key->second->type != AST_CONSTANT)
+							child->input_error("Indexed assignment pattern key must be a constant expression\n");
+						int index = key->second->bitsAsConst().as_int();
+						int position = -1;
+						for (int i = 0; i < total_elements; i++) {
+							auto indices = array_indices_from_position(lhs_mem, {i});
+							if (indices[0] == index) {
+								position = i;
+								break;
+							}
+						}
+						if (position < 0)
+							child->input_error("Indexed assignment pattern key %d is outside the array range\n", index);
+						if (keyed_pattern_elements[position])
+							child->input_error("Duplicate index %d in indexed assignment pattern\n", index);
+						keyed_pattern_elements[position] = child.get();
+					}
+
+					for (auto *element : keyed_pattern_elements)
+						if (!element && !pattern_default_element)
+							input_error("Indexed assignment pattern does not specify every array element\n");
 				} else if (num_dims > 1 && GetSize(rhs->children) == lhs_mem->dimensions[0].range_width) {
 					validate_pattern_shape(rhs, 0);
 				} else if (num_dims == 1 && GetSize(rhs->children) == total_elements) {
@@ -5233,8 +5299,10 @@ apply_newNode:
 		log_assert(newNode != nullptr);
 		auto member_tag = attributes.find(pattern_member_attr());
 		auto default_tag = attributes.find(pattern_default_attr());
+		auto index_tag = attributes.find(pattern_index_attr());
 		auto saved_member_tag = member_tag == attributes.end() ? nullptr : member_tag->second->clone();
 		auto saved_default_tag = default_tag == attributes.end() ? nullptr : default_tag->second->clone();
+		auto saved_index_tag = index_tag == attributes.end() ? nullptr : index_tag->second->clone();
 		newNode->location.begin.filename = location.begin.filename;
 		newNode->location = location;
 		newNode->cloneInto(*this);
@@ -5242,6 +5310,8 @@ apply_newNode:
 			attributes[pattern_member_attr()] = std::move(saved_member_tag);
 		if (saved_default_tag && !attributes.count(pattern_default_attr()))
 			attributes[pattern_default_attr()] = std::move(saved_default_tag);
+		if (saved_index_tag && !attributes.count(pattern_index_attr()))
+			attributes[pattern_index_attr()] = std::move(saved_index_tag);
 		fixup_hierarchy_flags();
 		did_something = true;
 	}

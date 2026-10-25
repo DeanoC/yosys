@@ -3778,9 +3778,13 @@ assignment_pattern_item:
 	expr {
 		$$ = std::move($1);
 	} |
-	TOK_ID TOK_COL expr {
+	expr TOK_COL expr {
+		bool is_identifier = $1->type == AST_IDENTIFIER;
+		std::string identifier = $1->str;
 		$$ = std::move($3);
-		$$->set_attribute("\\pattern_member", AstNode::mkconst_str(@1, *$1));
+		$$->set_attribute("\\pattern_index", std::move($1));
+		if (is_identifier)
+			$$->set_attribute("\\pattern_member", AstNode::mkconst_str(@1, identifier));
 	} |
 	TOK_DEFAULT TOK_COL expr {
 		$$ = std::move($3);
