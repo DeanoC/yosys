@@ -1142,6 +1142,8 @@ static std::unique_ptr<AstNode> struct_array_field_select(AstNode *prefix)
 	// basic_prep clear would run it through the multidimensional flattener,
 	// which treats that select as an index into the array dimension.
 	ident->basic_prep = true;
+	if (member->is_signed)
+		ident = std::make_unique<AstNode>(loc, AST_TO_SIGNED, std::move(ident));
 	return ident;
 }
 

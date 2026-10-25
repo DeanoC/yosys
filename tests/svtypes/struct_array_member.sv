@@ -8,7 +8,8 @@ module top(
 	output logic [3:0] z_gen,
 	output logic y_var,
 	output logic [3:0] z_lhs0,
-	output logic [3:0] z_lhs1
+	output logic [3:0] z_lhs1,
+	input logic signed_i
 );
 	typedef struct packed { logic a; logic [3:0] b; } s_t; // a at bit 4, b at bits [3:0]
 	s_t [3:0] arr;
@@ -26,9 +27,19 @@ module top(
 	assign z_lhs0 = cls[0].b;
 	assign z_lhs1 = cls[1].b;
 
+	typedef struct packed { logic signed [3:0] value; } signed_s_t;
+	signed_s_t [1:0] signed_arr;
+	logic [3:0] signed_shift;
+	logic [4:0] signed_extend;
+	assign signed_arr = {4'b0100, 4'b1100};
+	assign signed_shift = signed_arr[signed_i].value >>> 1;
+	assign signed_extend = signed_arr[signed_i].value;
+
 	always_comb assert(y_const == in[14]);
 	always_comb assert(z_gen == in[8:5]);
 	always_comb assert(y_var == in[(i * 5) + 4]);
 	always_comb assert(z_lhs0 == in[3:0]);
 	always_comb assert(z_lhs1 == in[7:4]);
+	always_comb assert(signed_i ? signed_shift == 4'b0010 : signed_shift == 4'b1110);
+	always_comb assert(signed_i ? signed_extend == 5'b00100 : signed_extend == 5'b11100);
 endmodule
