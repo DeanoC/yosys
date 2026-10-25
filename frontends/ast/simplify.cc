@@ -1117,7 +1117,8 @@ static std::unique_ptr<AstNode> struct_array_field_select(AstNode *prefix)
 		prefix->input_error("Member select on multidimensional packed array `%s' is not supported\n", prefix->str);
 
 	auto loc = prefix->location;
-	auto index = normalize_index(prefix->children[0].get(), wire, 0);
+	auto outer_index = normalize_index(prefix->children[0].get(), wire, 0);
+	auto index = outer_index->clone();
 	int stride = wire->dimensions[1].range_width;
 	if (stride != 1)
 		index = multiply_by_const(std::move(index), stride);
@@ -1128,6 +1129,7 @@ static std::unique_ptr<AstNode> struct_array_field_select(AstNode *prefix)
 	int rel_left = rel_width - 1;
 	int rel_right = 0;
 	std::unique_ptr<AstNode> rel_lsb_expr;
+	std::unique_ptr<AstNode> dynamic_index_valid;
 	bool dynamic_bit_select = false;
 	bool explicit_member_select = !prefix->children[1]->children.empty();
 	if (!prefix->children[1]->children.empty()) {
@@ -1150,25 +1152,29 @@ static std::unique_ptr<AstNode> struct_array_field_select(AstNode *prefix)
 			rel_width = member_width / member->dimensions[0].range_width;
 
 			// Dynamic member indices outside the member must not spill into another
-			// field. Use an out-of-wire offset for invalid indices, which also makes
-			// dynamic lvalue lowering drop the write.
+			// field. Keep both outer and member bounds checks until the full offset is
+			// formed, so their fallback cannot be brought back into the wire by a
+			// negative outer index.
 			auto member_pos = normalize_index(prefix->children[1]->children[0]->children[0].get(), member, 0);
-			int member_pos_width;
-			bool member_pos_signed;
-			member_pos->detectSignWidth(member_pos_width, member_pos_signed);
-			member_pos = std::make_unique<AstNode>(loc, AST_CAST_SIZE,
-					node_int(loc, member_pos_width + 1), std::move(member_pos));
-			if (!member_pos_signed)
-				member_pos = std::make_unique<AstNode>(loc, AST_TO_SIGNED, std::move(member_pos));
-			auto pos_nonnegative = std::make_unique<AstNode>(loc, AST_GE,
-				member_pos->clone(), node_int(loc, 0));
-			auto pos_in_range = std::make_unique<AstNode>(loc, AST_LT,
-				std::move(member_pos), node_int(loc, member->dimensions[0].range_width));
-			auto member_index_valid = std::make_unique<AstNode>(loc, AST_LOGIC_AND,
-				std::move(pos_nonnegative), std::move(pos_in_range));
-			int wire_width = wire->range_left - wire->range_right + 1;
-			rel_lsb_expr = std::make_unique<AstNode>(loc, AST_TERNARY,
-				std::move(member_index_valid), std::move(rel_lsb_expr), node_int(loc, wire_width - member->range_right));
+			auto index_in_range = [loc](std::unique_ptr<AstNode> pos, int width) {
+				int pos_width;
+				bool pos_signed;
+				pos->detectSignWidth(pos_width, pos_signed);
+				pos = std::make_unique<AstNode>(loc, AST_CAST_SIZE,
+						node_int(loc, pos_width + 1), std::move(pos));
+				if (!pos_signed)
+					pos = std::make_unique<AstNode>(loc, AST_TO_SIGNED, std::move(pos));
+				auto pos_nonnegative = std::make_unique<AstNode>(loc, AST_GE,
+					pos->clone(), node_int(loc, 0));
+				auto pos_in_range = std::make_unique<AstNode>(loc, AST_LT,
+					std::move(pos), node_int(loc, width));
+				return std::make_unique<AstNode>(loc, AST_LOGIC_AND,
+					std::move(pos_nonnegative), std::move(pos_in_range));
+			};
+			auto member_index_valid = index_in_range(member_pos->clone(), member->dimensions[0].range_width);
+			auto outer_index_valid = index_in_range(outer_index->clone(), wire->dimensions[0].range_width);
+			dynamic_index_valid = std::make_unique<AstNode>(loc, AST_LOGIC_AND,
+				std::move(member_index_valid), std::move(outer_index_valid));
 			dynamic_bit_select = true;
 		} else {
 			prefix->input_error("Non-constant bit select in member `%s' of `%s'\n", field, prefix->str);
@@ -1217,6 +1223,13 @@ static std::unique_ptr<AstNode> struct_array_field_select(AstNode *prefix)
 		index = std::make_unique<AstNode>(loc, AST_ADD, std::move(index), node_int(loc, base));
 	if (rel_lsb_expr)
 		index = std::make_unique<AstNode>(loc, AST_ADD, std::move(index), std::move(rel_lsb_expr));
+	if (dynamic_index_valid) {
+		// Keep the entire dynamic part-select out of range for invalid indices,
+		// regardless of the outer offset or the selected member width.
+		int wire_width = wire->range_left - wire->range_right + 1;
+		index = std::make_unique<AstNode>(loc, AST_TERNARY,
+			std::move(dynamic_index_valid), std::move(index), node_int(loc, wire_width + rel_width));
+	}
 
 	std::unique_ptr<AstNode> range;
 	if (rel_width == 1) {

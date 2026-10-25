@@ -6,6 +6,8 @@ module top(
 	input logic [1:0] i,
 	input logic [1:0] j,
 	input logic [2:0] member_j,
+	input logic signed [3:0] member_signed_j,
+	input logic signed [2:0] outer_idx,
 	input logic [1:0] multidim_j,
 	output logic y_const,
 	output logic [3:0] z_gen,
@@ -62,11 +64,28 @@ module top(
 	logic oob_low_read;
 	logic [2:0] oob_part_read;
 	logic [2:0] oob_low_part_read;
+	s_t [1:0] combo_arr;
+	logic combo_const_neg_read;
+	logic combo_const_pos_read;
+	logic combo_dynamic_read;
+	logic combo_const_neg_signed_read;
+	logic combo_dynamic_signed_read;
 	assign oob_read = arr[0].b[4];
 	assign oob_low_read = arr[0].b[-1];
 	assign oob_part_read = arr[0].b[4:2];
 	assign oob_low_part_read = arr[0].b[1:-1];
+	assign combo_arr = '0;
+	assign combo_const_neg_read = combo_arr[-1].b[member_j];
+	assign combo_const_pos_read = combo_arr[2].b[member_j];
+	assign combo_dynamic_read = combo_arr[outer_idx].b[member_j];
+	assign combo_const_neg_signed_read = combo_arr[-1].b[member_signed_j];
+	assign combo_dynamic_signed_read = combo_arr[outer_idx].b[member_signed_j];
 	s_t [1:0] oob_write;
+	s_t [1:0] combo_const_neg_write;
+	s_t [1:0] combo_const_pos_write;
+	s_t [1:0] combo_dynamic_write;
+	s_t [1:0] combo_const_neg_signed_write;
+	s_t [1:0] combo_dynamic_signed_write;
 	always_comb begin
 		oob_write = '0;
 		oob_write[0].b = 4'b0101;
@@ -77,6 +96,29 @@ module top(
 		assert(oob_low_part_read === {arr[0].b[1:0], 1'bx});
 		assert(oob_write[0].a == 1'b0);
 		assert(oob_write[0].b[3:2] == 2'b01);
+		assert(combo_const_neg_read === 1'bx);
+		assert(combo_const_pos_read === 1'bx);
+		assert((outer_idx >= 0 && outer_idx <= 1 && member_j < 4) || combo_dynamic_read === 1'bx);
+		assert(combo_const_neg_signed_read === 1'bx);
+		assert((outer_idx >= 0 && outer_idx <= 1 && member_signed_j >= 0 && member_signed_j < 4) || combo_dynamic_signed_read === 1'bx);
+
+		combo_const_neg_write = '0;
+		combo_const_neg_write[-1].b[member_j] = 1'b1;
+		assert(combo_const_neg_write == '0);
+		combo_const_pos_write = '0;
+		combo_const_pos_write[2].b[member_j] = 1'b1;
+		assert(combo_const_pos_write == '0);
+		combo_dynamic_write = '0;
+		combo_dynamic_write[outer_idx].b[member_j] = 1'b1;
+		if (outer_idx < 0 || outer_idx > 1 || member_j >= 4)
+			assert(combo_dynamic_write == '0);
+		combo_const_neg_signed_write = '0;
+		combo_const_neg_signed_write[-1].b[member_signed_j] = 1'b1;
+		assert(combo_const_neg_signed_write == '0);
+		combo_dynamic_signed_write = '0;
+		combo_dynamic_signed_write[outer_idx].b[member_signed_j] = 1'b1;
+		if (outer_idx < 0 || outer_idx > 1 || member_signed_j < 0 || member_signed_j >= 4)
+			assert(combo_dynamic_signed_write == '0);
 	end
 
 	always_comb assert(y_const == in[14]);
