@@ -1,0 +1,4 @@
+read_verilog -sv function_return_flag_collision.sv
+prep -top top
+async2sync
+sat -verify -prove-asserts

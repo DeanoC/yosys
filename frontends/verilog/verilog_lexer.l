@@ -357,6 +357,7 @@ TIME_SCALE_SUFFIX [munpf]?s
 "endmodule"    { return parser::make_TOK_ENDMODULE(out_loc); }
 "function"     { return parser::make_TOK_FUNCTION(out_loc); }
 "endfunction"  { return parser::make_TOK_ENDFUNCTION(out_loc); }
+"return"       { SV_KEYWORD(parser::make_TOK_RETURN(out_loc)); }
 "task"         { return parser::make_TOK_TASK(out_loc); }
 "endtask"      { return parser::make_TOK_ENDTASK(out_loc); }
 "specify"      { return mode->specify ? parser::make_TOK_SPECIFY(out_loc) : parser::make_TOK_IGNORED_SPECIFY(out_loc); }
