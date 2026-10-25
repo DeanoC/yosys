@@ -195,6 +195,7 @@ namespace AST
 		std::string str;
 		std::vector<RTLIL::State> bits;
 		bool is_input, is_output, is_reg, is_logic, is_signed, is_string, is_wand, is_wor, range_valid, range_swapped, was_checked, is_unsized, is_custom_type;
+		bool is_sv_return; // Internal marker for a parsed SystemVerilog return statement.
 		int port_id, range_left, range_right;
 		uint32_t integer;
 		double realvalue;

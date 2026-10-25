@@ -99,6 +99,7 @@
 			void addTypedefNode(std::string *name, std::unique_ptr<AstNode> node);
 			void registerImportedPackageTypes(const AstNode *import_node);
 			void addLocalName(const std::string *name);
+			void lowerSvReturns(AstNode *func);
 			void enterTypeScope();
 			void exitTypeScope();
 			bool isUserType(const std::string &name);
@@ -305,6 +306,184 @@
 				auto qname = current_ast_mod->str + "::" + (*name).substr(1);
 				pkg_user_types[qname] = tnode;
 			}
+		}
+
+		static bool is_sv_return(AstNode *node)
+		{
+			return node->is_sv_return;
+		}
+
+		static bool is_return_decl(const AstNode *node)
+		{
+			switch (node->type) {
+			case AST_WIRE:
+			case AST_MEMORY:
+			case AST_PARAMETER:
+			case AST_LOCALPARAM:
+			case AST_TYPEDEF:
+			case AST_ENUM:
+			case AST_STRUCT:
+			case AST_UNION:
+				return true;
+			default:
+				return false;
+			}
+		}
+
+		// True if `node` contains a return. A return inside a loop is rejected:
+		// constant for-unrolling cannot see a flag set on a later iteration.
+		static bool contains_sv_return(AstNode *node)
+		{
+			if (is_sv_return(node))
+				return true;
+			if (node->type == AST_FOR || node->type == AST_WHILE || node->type == AST_REPEAT) {
+				for (auto &child : node->children)
+					if (contains_sv_return(child.get()))
+						node->input_error("return inside a loop is not supported\n");
+				return false;
+			}
+			for (auto &child : node->children)
+				if (contains_sv_return(child.get()))
+					return true;
+			return false;
+		}
+
+		static bool list_needs_return_guard(std::vector<std::unique_ptr<AstNode>> &stmts);
+
+		static bool stmt_needs_internal_return_guard(AstNode *stmt)
+		{
+			if (stmt->type == AST_BLOCK && !is_sv_return(stmt))
+				return list_needs_return_guard(stmt->children);
+			if (stmt->type == AST_CASE) {
+				for (size_t i = 1; i < stmt->children.size(); i++) {
+					auto &cond = stmt->children[i];
+					if (cond->children.empty())
+						continue;
+					auto &body = cond->children.back();
+					if (stmt_needs_internal_return_guard(body.get()))
+						return true;
+				}
+			}
+			return false;
+		}
+
+		static bool list_needs_return_guard(std::vector<std::unique_ptr<AstNode>> &stmts)
+		{
+			bool seen_return = false;
+			for (auto &stmt : stmts) {
+				if (is_return_decl(stmt.get()))
+					continue;
+				if (seen_return || stmt_needs_internal_return_guard(stmt.get()))
+					return true;
+				if (contains_sv_return(stmt.get()))
+					seen_return = true;
+			}
+			return false;
+		}
+
+		static std::unique_ptr<AstNode> assign_return_flag(const AstSrcLocType &loc, const std::string &flag, int value)
+		{
+			auto id = std::make_unique<AstNode>(loc, AST_IDENTIFIER);
+			id->str = flag;
+			return std::make_unique<AstNode>(loc, AST_ASSIGN_EQ, std::move(id), AstNode::mkconst_int(loc, value, false, 1));
+		}
+
+		static std::unique_ptr<AstNode> guard_unless_returned(std::unique_ptr<AstNode> stmt, const std::string &flag)
+		{
+			auto loc = stmt->location;
+			auto id = std::make_unique<AstNode>(loc, AST_IDENTIFIER);
+			id->str = flag;
+			auto cond_expr = std::make_unique<AstNode>(loc, AST_REDUCE_BOOL, std::make_unique<AstNode>(loc, AST_LOGIC_NOT, std::move(id)));
+			auto body = std::make_unique<AstNode>(loc, AST_BLOCK, std::move(stmt));
+			auto cond = std::make_unique<AstNode>(loc, AST_COND, AstNode::mkconst_int(loc, 1, false, 1), std::move(body));
+			return std::make_unique<AstNode>(loc, AST_CASE, std::move(cond_expr), std::move(cond));
+		}
+
+		static std::unique_ptr<AstNode> finish_sv_return(std::unique_ptr<AstNode> stmt, bool use_flag, const std::string &flag)
+		{
+			auto loc = stmt->location;
+			stmt->is_sv_return = false;
+			if (!use_flag) {
+				if (stmt->type == AST_BLOCK && stmt->children.empty())
+					return nullptr;
+				return stmt;
+			}
+			if (stmt->type == AST_BLOCK && stmt->children.empty())
+				return assign_return_flag(loc, flag, 1);
+			return std::make_unique<AstNode>(loc, AST_BLOCK, std::move(stmt), assign_return_flag(loc, flag, 1));
+		}
+
+		static void lower_return_list(std::vector<std::unique_ptr<AstNode>> &stmts, bool use_flag, const std::string &flag, bool inject_init);
+
+		static void lower_return_stmt(std::unique_ptr<AstNode> &stmt, bool use_flag, const std::string &flag)
+		{
+			if (!stmt || is_sv_return(stmt.get()))
+				return;
+			if (stmt->type == AST_FOR || stmt->type == AST_WHILE || stmt->type == AST_REPEAT)
+				return;
+			if (stmt->type == AST_BLOCK) {
+				lower_return_list(stmt->children, use_flag, flag, false);
+				return;
+			}
+			if (stmt->type == AST_CASE) {
+				for (size_t i = 1; i < stmt->children.size(); i++) {
+					auto &cond = stmt->children[i];
+					if (!cond->children.empty())
+						lower_return_stmt(cond->children.back(), use_flag, flag);
+				}
+			}
+		}
+
+		static void lower_return_list(std::vector<std::unique_ptr<AstNode>> &stmts, bool use_flag, const std::string &flag, bool inject_init)
+		{
+			std::vector<std::unique_ptr<AstNode>> out;
+			bool seen_return = false;
+			bool inserted_init = !inject_init;
+			for (auto &stmt : stmts) {
+				if (is_return_decl(stmt.get())) {
+					out.push_back(std::move(stmt));
+					continue;
+				}
+				if (!inserted_init) {
+					out.push_back(assign_return_flag(stmt->location, flag, 0));
+					inserted_init = true;
+				}
+				bool direct = is_sv_return(stmt.get());
+				bool has_return = direct || contains_sv_return(stmt.get());
+				if (direct)
+					stmt = finish_sv_return(std::move(stmt), use_flag, flag);
+				else
+					lower_return_stmt(stmt, use_flag, flag);
+				if (seen_return && use_flag && stmt)
+					stmt = guard_unless_returned(std::move(stmt), flag);
+				if (has_return)
+					seen_return = true;
+				if (stmt)
+					out.push_back(std::move(stmt));
+			}
+			stmts.swap(out);
+		}
+
+		void ParseState::lowerSvReturns(AstNode *func)
+		{
+			if (!func)
+				return;
+			bool any = false;
+			for (auto &child : func->children)
+				if (contains_sv_return(child.get()))
+					any = true;
+			if (!any)
+				return;
+			bool use_flag = list_needs_return_guard(func->children);
+			std::string flag = stringf("$sv_return_flag$%d", autoidx++);
+			if (use_flag) {
+				auto wire = std::make_unique<AstNode>(func->location, AST_WIRE);
+				wire->str = flag;
+				wire->is_reg = true;
+				wire->is_logic = true;
+				func->children.insert(func->children.begin(), std::move(wire));
+			}
+			lower_return_list(func->children, use_flag, flag, use_flag);
 		}
 
 		static void addQualifiedImport(ParseState *extra, const std::string &qname, const frontend_verilog_yy::parser::location_type &loc)
@@ -614,7 +793,7 @@
 %token TOK_BEGIN TOK_END TOK_IF TOK_ELSE TOK_IFNONE TOK_FOR TOK_WHILE TOK_REPEAT
 %token TOK_DPI_FUNCTION TOK_POSEDGE TOK_NEGEDGE TOK_OR TOK_AUTOMATIC
 %token TOK_CASE TOK_CASEX TOK_CASEZ TOK_ENDCASE TOK_DEFAULT
-%token TOK_FUNCTION TOK_ENDFUNCTION TOK_TASK TOK_ENDTASK TOK_SPECIFY
+%token TOK_FUNCTION TOK_ENDFUNCTION TOK_TASK TOK_ENDTASK TOK_RETURN TOK_SPECIFY
 %token TOK_IGNORED_SPECIFY TOK_ENDSPECIFY TOK_SPECPARAM TOK_SPECIFY_AND TOK_IGNORED_SPECIFY_AND
 %token TOK_GENERATE TOK_ENDGENERATE TOK_GENVAR TOK_REAL
 %token TOK_SYNOPSYS_FULL_CASE TOK_SYNOPSYS_PARALLEL_CASE
@@ -1289,6 +1468,7 @@ task_func_decl:
 		append_attr(extra->current_function_or_task, std::move($1));
 		extra->current_function_or_task_port_id = 1;
 	} task_func_args_opt TOK_SEMICOL task_func_body TOK_ENDTASK {
+		extra->lowerSvReturns(extra->current_function_or_task);
 		extra->current_function_or_task = nullptr;
 		extra->ast_stack.pop_back();
 	} |
@@ -1303,6 +1483,7 @@ task_func_decl:
 		append_attr(extra->current_function_or_task, std::move($1));
 		extra->current_function_or_task_port_id = 1;
 	} task_func_args_opt TOK_SEMICOL task_func_body TOK_ENDFUNCTION {
+		extra->lowerSvReturns(extra->current_function_or_task);
 		extra->current_function_or_task = nullptr;
 		extra->ast_stack.pop_back();
 	} |
@@ -1323,6 +1504,7 @@ task_func_decl:
 		extra->current_function_or_task->children.push_back(std::move(outreg));
 		extra->current_function_or_task_port_id = 1;
 	} task_func_args_opt TOK_SEMICOL task_func_body TOK_ENDFUNCTION {
+		extra->lowerSvReturns(extra->current_function_or_task);
 		extra->current_function_or_task = nullptr;
 		extra->ast_stack.pop_back();
 	};
@@ -2942,6 +3124,26 @@ behavioral_stmt:
 	defattr | assert | wire_decl | param_decl | localparam_decl | typedef_decl |
 	non_opt_delay behavioral_stmt |
 	simple_behavioral_stmt TOK_SEMICOL |
+	TOK_RETURN expr TOK_SEMICOL {
+		if (!extra->current_function_or_task)
+			err_at_loc(@1, "return statement is only supported in a function or task.");
+		if (extra->current_function_or_task->type != AST_FUNCTION)
+			err_at_loc(@1, "A task or void function return cannot return a value.");
+		auto lhs = std::make_unique<AstNode>(@1, AST_IDENTIFIER);
+		lhs->str = extra->current_function_or_task->str;
+		auto asgn = std::make_unique<AstNode>(@$, AST_ASSIGN_EQ, std::move(lhs), std::move($2));
+		asgn->is_sv_return = true;
+		extra->saveChild(std::move(asgn));
+	} |
+	TOK_RETURN TOK_SEMICOL {
+		if (!extra->current_function_or_task)
+			err_at_loc(@1, "return statement is only supported in a function or task.");
+		if (extra->current_function_or_task->type == AST_FUNCTION)
+			err_at_loc(@1, "A function return must return a value.");
+		auto block = std::make_unique<AstNode>(@$, AST_BLOCK);
+		block->is_sv_return = true;
+		extra->saveChild(std::move(block));
+	} |
 	attr TOK_SEMICOL |
 	attr hierarchical_id {
 		AstNode* node = extra->pushChild(std::make_unique<AstNode>(@$, AST_TCALL));
