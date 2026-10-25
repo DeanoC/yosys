@@ -4,6 +4,12 @@ List of major changes and improvements between releases
 
 Yosys 0.70 .. Yosys 0.71-dev
 --------------------------
+ * Commands and options
+    - Added "-lutadders" to "synth_intel_alm". Adders, subtractors and
+      ALUs no wider than the given result, or marked with
+      `+ (* no_carry *)`, are built from LUTs. Wider arithmetic keeps
+      the ALM carry chain. `(* use_carry *)` forces the carry chain.
+
  * Various
     - intel_alm: Infer initialized MLABs and dual-clock, byte-enable,
       mixed-width, and true dual-port M10K RAM; keep Cyclone V HPS I2C.

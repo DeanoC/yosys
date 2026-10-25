@@ -1,0 +1,4 @@
+read_verilog -sv function_return_user_attr.sv
+prep -top top
+async2sync
+sat -verify -prove-asserts
