@@ -1,0 +1,4 @@
+read_verilog -sv gen_packed_array.sv
+prep -top top
+async2sync
+sat -verify -prove-asserts
