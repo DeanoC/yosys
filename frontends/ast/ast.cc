@@ -222,6 +222,7 @@ AstNode::AstNode(AstSrcLocType loc, AstNodeType type, std::unique_ptr<AstNode> c
 	is_signed = false;
 	is_string = false;
 	is_enum = false;
+	is_sv_return = false;
 	is_wand = false;
 	is_wor = false;
 	is_unsized = false;
@@ -288,6 +289,7 @@ void AstNode::cloneInto(AstNode &other) const
 	other.integer = integer;
 	other.realvalue = realvalue;
 	other.is_enum = is_enum;
+	other.is_sv_return = is_sv_return;
 	other.dimensions = dimensions;
 	other.unpacked_dimensions = unpacked_dimensions;
 	other.id2ast = id2ast;
@@ -826,6 +828,8 @@ bool AstNode::operator==(const AstNode &other) const
 	if (is_signed != other.is_signed)
 		return false;
 	if (is_string != other.is_string)
+		return false;
+	if (is_sv_return != other.is_sv_return)
 		return false;
 	if (range_valid != other.range_valid)
 		return false;

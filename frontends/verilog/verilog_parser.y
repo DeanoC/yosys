@@ -278,7 +278,7 @@
 
 		static bool is_sv_return(AstNode *node)
 		{
-			return node->get_bool_attribute("\\sv_return");
+			return node->is_sv_return;
 		}
 
 		static bool is_return_decl(const AstNode *node)
@@ -370,7 +370,7 @@
 		static std::unique_ptr<AstNode> finish_sv_return(std::unique_ptr<AstNode> stmt, bool use_flag, const std::string &flag)
 		{
 			auto loc = stmt->location;
-			stmt->attributes.erase(AST::intern_attr_name("\\sv_return"));
+			stmt->is_sv_return = false;
 			if (!use_flag) {
 				if (stmt->type == AST_BLOCK && stmt->children.empty())
 					return nullptr;
@@ -443,7 +443,7 @@
 			if (!any)
 				return;
 			bool use_flag = list_needs_return_guard(func->children);
-			std::string flag = "\\$sv_return_flag";
+			std::string flag = stringf("$sv_return_flag$%d", autoidx++);
 			if (use_flag) {
 				auto wire = std::make_unique<AstNode>(func->location, AST_WIRE);
 				wire->str = flag;
@@ -2981,7 +2981,7 @@ behavioral_stmt:
 		auto lhs = std::make_unique<AstNode>(@1, AST_IDENTIFIER);
 		lhs->str = extra->current_function_or_task->str;
 		auto asgn = std::make_unique<AstNode>(@$, AST_ASSIGN_EQ, std::move(lhs), std::move($2));
-		asgn->set_attribute("\\sv_return", AstNode::mkconst_int(@1, 1, false));
+		asgn->is_sv_return = true;
 		extra->saveChild(std::move(asgn));
 	} |
 	TOK_RETURN TOK_SEMICOL {
@@ -2990,7 +2990,7 @@ behavioral_stmt:
 		if (extra->current_function_or_task->type == AST_FUNCTION)
 			err_at_loc(@1, "A function return must return a value.");
 		auto block = std::make_unique<AstNode>(@$, AST_BLOCK);
-		block->set_attribute("\\sv_return", AstNode::mkconst_int(@1, 1, false));
+		block->is_sv_return = true;
 		extra->saveChild(std::move(block));
 	} |
 	attr TOK_SEMICOL |
