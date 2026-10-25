@@ -5939,6 +5939,10 @@ bool AstNode::replace_variables(std::map<std::string, AstNode::varinfo_t> &varia
 			}
 			offset = min(children.at(0)->range_left, children.at(0)->range_right);
 			width = min(std::abs(children.at(0)->range_left - children.at(0)->range_right) + 1, width);
+			// make_index_range() is relative to the member. genRTLIL adds the
+			// member's base offset; constant evaluation has to do the same.
+			if (AstNode *member = get_struct_member())
+				offset += min(member->range_left, member->range_right);
 		}
 		offset -= variables.at(str).offset;
 		if (variables.at(str).range_swapped)
@@ -6053,6 +6057,15 @@ std::unique_ptr<AstNode> AstNode::eval_const_function(AstNode *fcall, bool must_
 			if (stmt->type != AST_ASSIGN_EQ)
 				continue;
 
+			// Member selects are rewritten to a range on the parent during simplify,
+			// so a value such as f.b is only visible to replace_variables afterwards.
+			if (!stmt->children.at(1)->replace_variables(variables, fcall, must_succeed))
+				goto finished;
+			while (stmt->simplify(true, 1, -1, false)) { }
+
+			if (stmt->type != AST_ASSIGN_EQ)
+				continue;
+
 			if (stmt->children.at(1)->type != AST_CONSTANT) {
 				if (!must_succeed)
 					goto finished;
@@ -6084,6 +6097,8 @@ std::unique_ptr<AstNode> AstNode::eval_const_function(AstNode *fcall, bool must_
 					range->input_error("Non-constant range\n%s: ... called from here.\n", fcall->loc_string());
 				}
 				int offset = min(range->range_left, range->range_right);
+				if (AstNode *member = stmt->children.at(0)->get_struct_member())
+					offset += min(member->range_left, member->range_right);
 				int width = std::abs(range->range_left - range->range_right) + 1;
 				varinfo_t &v = variables[stmt->children.at(0)->str];
 				RTLIL::Const r = stmt->children.at(1)->bitsAsConst(v.val.size());
