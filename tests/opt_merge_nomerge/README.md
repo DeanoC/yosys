@@ -2,6 +2,8 @@
 
 `(* nomerge = 1 *)` on a process propagates to its emitted FF. On a
 combinational process it is copied onto the wires that process drives.
+On a latch process, `proc_dlatch` copies it onto the inferred latch and
+the private enable and data cone that feeds that latch.
 `(* nomerge *)` on a wire covers the private logic driving that wire, so
 replicated cones stay distinct. Public nets and ports remain shared
 boundaries. `opt_merge` excludes true-marked cells from duplicate matching

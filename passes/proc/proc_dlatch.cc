@@ -434,6 +434,91 @@ struct proc_dlatch_db_t
 	}
 };
 
+static bool latch_wire_is_private(const RTLIL::Wire *wire)
+{
+	if (wire->port_id != 0 || wire->name.isPublic())
+		return false;
+	if (wire->get_bool_attribute(ID::keep))
+		return false;
+	return true;
+}
+
+// A latch is a state cell, so the later wire walk stops at it and would
+// leave the enable and data muxes mergeable. Stamp the latch and the
+// private cone on its inputs here. Public nets and ports stay shared.
+static void mark_nomerge_latches(proc_dlatch_db_t &db, RTLIL::IdString nomerge,
+		const std::vector<std::pair<RTLIL::Cell*, RTLIL::SigSpec>> &latches)
+{
+	pool<RTLIL::SigBit> boundary;
+	for (auto wire : db.module->wires()) {
+		if (latch_wire_is_private(wire))
+			continue;
+		for (auto bit : db.sigmap(wire))
+			if (bit.wire)
+				boundary.insert(bit);
+	}
+
+	dict<RTLIL::SigBit, std::vector<RTLIL::Cell*>> drivers;
+	for (auto cell : db.module->cells()) {
+		for (auto &conn : cell->connections()) {
+			if (!cell->output(conn.first))
+				continue;
+			for (auto bit : db.sigmap(conn.second))
+				if (bit.wire)
+					drivers[bit].push_back(cell);
+		}
+	}
+
+	pool<RTLIL::Cell*> seen;
+	std::vector<RTLIL::SigBit> queue;
+	pool<RTLIL::SigBit> queued;
+	auto enqueue_inputs = [&](RTLIL::Cell *cell) {
+		for (auto &conn : cell->connections()) {
+			if (!cell->input(conn.first))
+				continue;
+			for (auto bit : db.sigmap(conn.second)) {
+				if (!bit.wire || boundary.count(bit))
+					continue;
+				if (queued.insert(bit).second)
+					queue.push_back(bit);
+			}
+		}
+	};
+
+	int marked_inputs = 0;
+	for (auto [latch, q] : latches) {
+		latch->set_bool_attribute(nomerge, true);
+		for (auto bit : q)
+			if (bit.wire && !bit.wire->get_bool_attribute(nomerge))
+				bit.wire->set_bool_attribute(nomerge, true);
+		if (!seen.insert(latch).second)
+			continue;
+		enqueue_inputs(latch);
+	}
+
+	for (size_t i = 0; i < queue.size(); i++) {
+		auto found = drivers.find(queue[i]);
+		if (found == drivers.end())
+			continue;
+		for (auto cell : found->second) {
+			if (!seen.insert(cell).second)
+				continue;
+			if (!cell->get_bool_attribute(nomerge)) {
+				cell->set_bool_attribute(nomerge, true);
+				marked_inputs++;
+			}
+			if (cell->is_builtin_ff())
+				continue;
+			if (cell->type.in(ID($mem), ID($mem_v2), ID($memrd), ID($memrd_v2),
+					ID($memwr), ID($memwr_v2), ID($meminit), ID($meminit_v2)))
+				continue;
+			enqueue_inputs(cell);
+		}
+	}
+	if (marked_inputs)
+		log("  marked %d private input cells of (* nomerge *) latches.\n", marked_inputs);
+}
+
 void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc, LatchPolicy policy)
 {
 	RTLIL::IdString nomerge = db.module->twines().find("\\nomerge");
@@ -498,6 +583,8 @@ void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc, LatchPolicy policy)
 		latches_rst[it.first] = nrst;
 		latches_set[it.first] = nset;
 	}
+
+	std::vector<std::pair<RTLIL::Cell*, RTLIL::SigSpec>> nomerge_latches;
 
 	int offset = 0;
 	for (auto chunk : nolatches_bits.first.chunks()) {
@@ -569,6 +656,8 @@ void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc, LatchPolicy policy)
 			cell->set_src_attribute(src);
 			if (proc->get_bool_attribute(ID::always_latch))
 				cell->set_bool_attribute(ID::always_latch);
+			if (proc_nomerge)
+				nomerge_latches.push_back({cell, lhs});
 			db.generated_dlatches.insert(cell);
 
 			if (proc->get_bool_attribute(ID::always_comb))
@@ -590,6 +679,9 @@ void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc, LatchPolicy policy)
 
 		offset += width;
 	}
+
+	if (proc_nomerge && !nomerge_latches.empty())
+		mark_nomerge_latches(db, nomerge, nomerge_latches);
 }
 
 struct ProcDlatchPass : public Pass {
