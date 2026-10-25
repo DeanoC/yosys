@@ -538,6 +538,79 @@ void buffer_promoted_output_drivers(RTLIL::Design *design,
 		}
 }
 
+// Techmap leaves a missing clock as an undriven wire, which opt later folds to 1'x.
+bool clock_undriven(const RTLIL::SigSpec &raw, const pool<RTLIL::SigBit> &driven)
+{
+	if (raw.empty())
+		return true;
+	for (auto bit : raw) {
+		if (bit.wire == nullptr) {
+			if (bit.data != RTLIL::State::Sx && bit.data != RTLIL::State::Sz)
+				return false;
+			continue;
+		}
+		if (bit.wire->port_input || driven.count(bit))
+			return false;
+	}
+	return true;
+}
+
+// A case-table ROM has no write port. memory_bram still maps a large clocked
+// read onto MISTRAL_M10K, leaving CLK1 at 1'x and putting the read clock on
+// CLK2. nextpnr-mistral rejects that shape: CLK1 must be a connected clock,
+// and Cyclone V M10K cannot implement an asynchronous read. A single-clock
+// SDP already drives CLK1 and CLK2 from one net. The unused write port is
+// held disabled, so borrowing the read clock does not write the ROM.
+void tie_m10k_rom_clock(RTLIL::Design *design)
+{
+	for (auto module : design->modules()) {
+		if (module->get_blackbox_attribute())
+			continue;
+		// Cell types live in their own twine slot, so compare the text.
+		// Port names are ordinary module twines.
+		RTLIL::IdString clk1_port = module->twines().add("\\CLK1");
+		RTLIL::IdString clk2_port = module->twines().add("\\CLK2");
+		RTLIL::IdString en_port = module->twines().add("\\A1EN");
+		pool<RTLIL::SigBit> driven;
+		for (auto cell : module->cells())
+			for (auto &conn : cell->connections())
+				if (cell->output(conn.first))
+					for (auto bit : conn.second)
+						if (bit.wire)
+							driven.insert(bit);
+		for (auto &conn : module->connections())
+			for (auto bit : conn.first)
+				if (bit.wire)
+					driven.insert(bit);
+		for (auto cell : module->cells()) {
+			if (cell->type.unescape() != "MISTRAL_M10K")
+				continue;
+			bool clk1_open = !cell->hasPort(clk1_port) || clock_undriven(cell->getPort(clk1_port), driven);
+			if (!clk1_open)
+				continue;
+			if (!cell->hasPort(clk2_port) || clock_undriven(cell->getPort(clk2_port), driven))
+				log_error("M10K %s.%s has neither CLK1 nor CLK2; Cyclone V M10K cannot implement an asynchronous read.\n",
+						module, cell);
+			if (!cell->hasPort(en_port) || !cell->getPort(en_port).is_fully_const())
+				log_error("M10K %s.%s has no write clock, but its write enable is not constant.\n",
+						module, cell);
+			bool active_high = false;
+			if (cell->hasParam("\\CFG_BYTE_ENABLE") && cell->getParam("\\CFG_BYTE_ENABLE").as_bool())
+				active_high = true;
+			if (cell->hasParam("\\CFG_DBITS") && cell->getParam("\\CFG_DBITS").as_int() == 40)
+				active_high = true;
+			RTLIL::State inactive = active_high ? RTLIL::State::S0 : RTLIL::State::S1;
+			for (auto bit : cell->getPort(en_port))
+				if (bit.data != inactive)
+					log_error("M10K %s.%s has no write clock, but its write enable is active.\n",
+							module, cell);
+			log("Connecting M10K %s.%s CLK1 to its read clock; the cell has no write clock.\n",
+					module, cell);
+			cell->setPort(clk1_port, cell->getPort(clk2_port));
+		}
+	}
+}
+
 struct SynthIntelALMPass : public ScriptPass {
 	SynthIntelALMPass() : ScriptPass("synth_intel_alm", "synthesis for ALM-based Intel (Altera) FPGAs.") {}
 
@@ -871,6 +944,12 @@ struct SynthIntelALMPass : public ScriptPass {
 			run("clean -purge");
 			if (!noclkbuf)
 				run("clkbufmap -buf MISTRAL_CLKBUF Q:A", "(unless -noclkbuf)");
+			// memory_bram puts the read clock on CLK2 and leaves CLK1
+			// undriven when the memory has no write port. opt folds that
+			// missing clock to 1'x. nextpnr-mistral requires CLK1, so borrow
+			// the read clock once the unused write enable has folded too.
+			if (!help_mode && bram_type == "m10k")
+				tie_m10k_rom_clock(active_design);
 		}
 
 		if (check_label("map_luts")) {
