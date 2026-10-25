@@ -1473,6 +1473,13 @@ static void collect_package_locals(AstNode *scope, std::unordered_set<std::strin
 	}
 }
 
+static void collect_package_local_types(AstNode *scope, std::unordered_set<std::string> &types)
+{
+	for (auto &child : scope->children)
+		if (child->type == AST_TYPEDEF && !child->str.empty())
+			types.insert(child->str);
+}
+
 static void rename_in_package_stmts(AstNode *pkg)
 {
 	std::unordered_set<std::string> idents;
@@ -1485,29 +1492,36 @@ static void rename_in_package_stmts(AstNode *pkg)
 			for (auto& enode : item->children)
 				idents.insert(enode->str);
 	}
-	std::function<void(AstNode *, const std::unordered_set<std::string> &)> rename =
-		[&rename, &idents, pkg](AstNode *node, const std::unordered_set<std::string> &parent_locals) {
+	std::function<void(AstNode *, const std::unordered_set<std::string> &, const std::unordered_set<std::string> &)> rename =
+		[&rename, &idents, pkg](AstNode *node, const std::unordered_set<std::string> &parent_locals,
+						const std::unordered_set<std::string> &parent_types) {
 			std::unordered_set<std::string> locals;
+			std::unordered_set<std::string> types;
 			const std::unordered_set<std::string> *scope_locals = &parent_locals;
+			const std::unordered_set<std::string> *scope_types = &parent_types;
 			if (is_package_local_scope(node->type)) {
 				locals = parent_locals;
+				types = parent_types;
 				collect_package_locals(node, locals);
+				collect_package_local_types(node, types);
 				scope_locals = &locals;
+				scope_types = &types;
 			}
 			for (auto& child : node->children) {
-				// Value-space local declarations shadow AST_IDENTIFIER references.
-				bool is_shadowed_reference = child->type == AST_IDENTIFIER && scope_locals->count(child->str);
+				// Local declarations shadow references in their respective namespaces.
+				bool is_shadowed_reference = (child->type == AST_IDENTIFIER && scope_locals->count(child->str)) ||
+							(child->type == AST_WIRETYPE && scope_types->count(child->str));
 				bool is_function_result = is_package_function_result(node, child.get());
 				bool is_declaration = is_package_local_declaration(child->type) && !is_function_result;
 				if (!is_declaration && !is_shadowed_reference && idents.count(child->str))
 					child->str = pkg->str + "::" + child->str.substr(1);
-				rename(child.get(), *scope_locals);
+				rename(child.get(), *scope_locals, *scope_types);
 			}
 	};
 	std::unordered_set<std::string> no_locals;
 	for (auto& item : pkg->children)
 		if (item->type == AST_FUNCTION || item->type == AST_TASK)
-			rename(item.get(), no_locals);
+			rename(item.get(), no_locals, no_locals);
 }
 
 // create AstModule instances for all modules in the AST tree and add them to 'design'
