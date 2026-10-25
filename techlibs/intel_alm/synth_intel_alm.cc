@@ -538,17 +538,14 @@ void buffer_promoted_output_drivers(RTLIL::Design *design,
 		}
 }
 
-// Techmap leaves a missing clock as an undriven wire, which opt later folds to 1'x.
+// A missing clock can remain undriven or be folded to a constant by opt.
 bool clock_undriven(const RTLIL::SigSpec &raw, const pool<RTLIL::SigBit> &driven)
 {
 	if (raw.empty())
 		return true;
 	for (auto bit : raw) {
-		if (bit.wire == nullptr) {
-			if (bit.data != RTLIL::State::Sx && bit.data != RTLIL::State::Sz)
-				return false;
+		if (bit.wire == nullptr)
 			continue;
-		}
 		if (bit.wire->port_input || driven.count(bit))
 			return false;
 	}
@@ -556,8 +553,8 @@ bool clock_undriven(const RTLIL::SigSpec &raw, const pool<RTLIL::SigBit> &driven
 }
 
 // A case-table ROM has no write port. memory_bram still maps a large clocked
-// read onto MISTRAL_M10K, leaving CLK1 at 1'x and putting the read clock on
-// CLK2. nextpnr-mistral rejects that shape: CLK1 must be a connected clock,
+// read onto MISTRAL_M10K. CLK1 remains constant or undriven while the read
+// clock is on CLK2. nextpnr-mistral rejects that shape: CLK1 must be connected,
 // and Cyclone V M10K cannot implement an asynchronous read. A single-clock
 // SDP already drives CLK1 and CLK2 from one net. The unused write port is
 // held disabled, so borrowing the read clock does not write the ROM.
@@ -595,6 +592,8 @@ void tie_m10k_rom_clock(RTLIL::Design *design)
 				log_error("M10K %s.%s has no write clock, but its write enable is not constant.\n",
 						module, cell);
 			bool active_high = false;
+			if (cell->hasParam("\\CFG_MIXED_WIDTH") && cell->getParam("\\CFG_MIXED_WIDTH").as_bool())
+				active_high = true;
 			if (cell->hasParam("\\CFG_BYTE_ENABLE") && cell->getParam("\\CFG_BYTE_ENABLE").as_bool())
 				active_high = true;
 			if (cell->hasParam("\\CFG_DBITS") && cell->getParam("\\CFG_DBITS").as_int() == 40)
