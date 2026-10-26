@@ -1,0 +1,8 @@
+logger -expect error "Duplicate member 'x' in named assignment pattern" 1
+read_verilog -sv <<EOT
+module top;
+    typedef struct packed { logic x; logic [1:0] z; } s_t;
+    s_t s;
+    assign s = '{x: 1'b1, x: 1'b0, z: 2'b00};
+endmodule
+EOT

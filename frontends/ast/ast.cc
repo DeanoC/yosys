@@ -1447,11 +1447,6 @@ static bool is_package_local_scope(AstNodeType type)
 	return type == AST_FUNCTION || type == AST_TASK || type == AST_BLOCK || type == AST_FOR;
 }
 
-static bool is_package_function_result(const AstNode *scope, const AstNode *node)
-{
-	return scope->type == AST_FUNCTION && node->type == AST_WIRE && node->str == scope->str;
-}
-
 static void collect_package_locals(AstNode *scope, std::unordered_set<std::string> &locals)
 {
 	std::function<void(AstNode *)> collect_enum_items = [&collect_enum_items, &locals](AstNode *node) {
@@ -1466,8 +1461,10 @@ static void collect_package_locals(AstNode *scope, std::unordered_set<std::strin
 	for (auto &child : scope->children) {
 		if (!is_package_local_declaration(child->type))
 			continue;
-		// The function result wire follows the function's package-qualified name.
-		if (!child->str.empty() && !is_package_function_result(scope, child.get()))
+		// The implicit result wire keeps the function's bare name. Assignments to
+		// it must stay bare as well: `import p::*` calls the function by that
+		// name, and the wire is qualified only when the `p::fn` copy is made.
+		if (!child->str.empty())
 			locals.insert(child->str);
 		collect_enum_items(child.get());
 	}
@@ -1509,10 +1506,12 @@ static void rename_in_package_stmts(AstNode *pkg)
 			}
 			for (auto& child : node->children) {
 				// Local declarations shadow references in their respective namespaces.
+				// The function result wire is one of those declarations: its name
+				// matches the function, and it is qualified with the function node
+				// when that node is copied into a module under its package name.
 				bool is_shadowed_reference = (child->type == AST_IDENTIFIER && scope_locals->count(child->str)) ||
 							(child->type == AST_WIRETYPE && scope_types->count(child->str));
-				bool is_function_result = is_package_function_result(node, child.get());
-				bool is_declaration = is_package_local_declaration(child->type) && !is_function_result;
+				bool is_declaration = is_package_local_declaration(child->type);
 				if (!is_declaration && !is_shadowed_reference && idents.count(child->str))
 					child->str = pkg->str + "::" + child->str.substr(1);
 				rename(child.get(), *scope_locals, *scope_types);
@@ -1570,7 +1569,13 @@ void AST::process(RTLIL::Design *design, AstNode *ast, bool nodisplay, bool dump
 							e->str = n->str + std::string("::") + e->str.substr(1);
 						}
 					} else {
-						cloned_node->str = n->str + std::string("::") + cloned_node->str.substr(1);
+						std::string qualified = n->str + std::string("::") + cloned_node->str.substr(1);
+						// Qualify the implicit result wire along with the function.
+						// Leaving it bare lets `import p::*; fn()` resolve, and
+						// renaming it here keeps `p::fn()` pointed at the same wire.
+						if (cloned_node->type == AST_FUNCTION)
+							cloned_node->replace_result_wire_name_in_function(cloned_node->str, qualified);
+						cloned_node->str = qualified;
 					}
 					child->children.push_back(std::move(cloned_node));
 				}
