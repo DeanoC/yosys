@@ -1,0 +1,4 @@
+read_verilog -sv named_pattern_member_select.sv
+prep -top named_pattern_member_select
+async2sync
+sat -verify -prove-asserts

@@ -854,7 +854,7 @@
 %token TOK_z "'z'"
 
 %type <ast_t> range range_or_multirange non_opt_range non_opt_multirange
-%type <ast_t> wire_type expr basic_expr concat_list assignment_pattern_list rvalue lvalue lvalue_concat_list non_io_wire_type io_wire_type
+%type <ast_t> wire_type expr basic_expr concat_list assignment_pattern_list assignment_pattern_item rvalue lvalue lvalue_concat_list non_io_wire_type io_wire_type
 %type <string_t> opt_label opt_sva_label tok_prim_wrapper hierarchical_id hierarchical_type_id integral_number
 %type <string_t> type_name
 %type <ast_t> opt_enum_init enum_type struct_type enum_struct_type func_return_type typedef_base_type
@@ -3958,13 +3958,33 @@ concat_list:
 	};
 
 assignment_pattern_list:
-	expr {
+	assignment_pattern_item {
 		$$ = std::make_unique<AstNode>(@$, AST_ASSIGN_PATTERN);
 		$$->children.push_back(std::move($1));
 	} |
-	assignment_pattern_list TOK_COMMA expr {
+	assignment_pattern_list TOK_COMMA assignment_pattern_item {
 		$$ = std::move($1);
 		$$->children.push_back(std::move($3));
+	};
+
+assignment_pattern_item:
+	expr {
+		$$ = std::move($1);
+	} |
+	expr TOK_COL expr {
+		// A bare identifier can be a struct member name or an array index
+		// parameter. Keep its expression and member-name candidate until the
+		// assignment target type is known.
+		bool is_identifier = $1->type == AST_IDENTIFIER;
+		std::string identifier = $1->str;
+		$$ = std::move($3);
+		$$->set_attribute("\\pattern_index", std::move($1));
+		if (is_identifier)
+			$$->set_attribute("\\pattern_member", AstNode::mkconst_str(@1, identifier));
+	} |
+	TOK_DEFAULT TOK_COL expr {
+		$$ = std::move($3);
+		$$->set_attribute("\\pattern_default", AstNode::mkconst_int(@1, 1, false));
 	};
 
 integral_number:

@@ -655,6 +655,8 @@ void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc, LatchPolicy policy)
 			else
 				cell = db.module->addDlatch(NEW_ID, en, rhs, lhs);
 			cell->set_src_attribute(src);
+			if (proc_nomerge)
+				cell->set_bool_attribute(nomerge, true);
 			if (proc->get_bool_attribute(ID::always_latch))
 				cell->set_bool_attribute(ID::always_latch);
 			if (proc_nomerge)
