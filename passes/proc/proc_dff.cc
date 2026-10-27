@@ -252,6 +252,15 @@ void proc_dff(RTLIL::Module *mod, RTLIL::Process *proc, ConstEval &ce)
 				log_error("Mixed always event with edge and/or level sensitive events!\n");
 			log("  created direct connection (no actual register cell created).\n");
 			mod->connect(RTLIL::SigSig(sig, insig));
+			// A clocked process copies its attributes onto the FF cell.
+			// Combinational processes only leave a connection, so the
+			// attribute would never reach the cells that drive this wire.
+			RTLIL::IdString nomerge = mod->twines().find("\\nomerge");
+			if (nomerge != RTLIL::IdString() && proc->get_bool_attribute(nomerge)) {
+				for (auto bit : sig)
+					if (bit.wire && !bit.wire->get_bool_attribute(nomerge))
+						bit.wire->set_bool_attribute(nomerge, true);
+			}
 			continue;
 		}
 
