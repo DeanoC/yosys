@@ -56,6 +56,10 @@ struct WreduceWorker
 
 	std::set<Cell*, IdString::compare_ptr_by_name<Cell>> work_queue_cells;
 	std::set<SigBit> work_queue_bits;
+	// Cells that read bits this pass is about to tie off. Names, not pointers:
+	// a later cell in this pass may remove one of them. Recorded before the
+	// connection, because aliasing a bit to a constant drops it from ModIndex.
+	std::set<IdString> queued_cells;
 	pool<SigBit> keep_bits;
 	FfInitVals initvals;
 
@@ -230,6 +234,23 @@ struct WreduceWorker
 		cell->setPort(ID::D, sig_d);
 		cell->setPort(ID::Q, sig_q);
 		cell->fixup_parameters();
+	}
+
+	// Remember every selected cell that still reads these bits. Call this before
+	// replacing the bits with a constant: ModIndex forgets a bit once it no
+	// longer names a wire, so the usual end-of-pass worklist lookup cannot
+	// find the readers afterwards.
+	void queue_readers(const SigSpec &sig, Cell *except)
+	{
+		for (auto bit : sig) {
+			if (!bit.wire)
+				continue;
+			for (auto port : mi.query_ports(bit)) {
+				if (port.cell == except || !module->selected(port.cell))
+					continue;
+				queued_cells.insert(port.cell->name);
+			}
+		}
 	}
 
 	void run_reduce_inport(Cell *cell, char port, int max_port_size, bool &port_signed, bool &did_something)
@@ -427,6 +448,12 @@ struct WreduceWorker
 				sig.remove(max_y_size, GetSize(extra_bits));
 
 				SigBit padbit = is_signed ? sig[GetSize(sig)-1] : State::S0;
+				// A shared producer (for example one i*W $mul used by two
+				// arr[i].field adds) is often narrowed only after an earlier
+				// reader has already been visited. Queue those readers now,
+				// while ModIndex still lists them, so the next pass sees the
+				// tied-off bits and can shrink the shift amount.
+				queue_readers(extra_bits, cell);
 				module->connect(extra_bits, SigSpec(padbit, GetSize(extra_bits)));
 			}
 		}
@@ -483,6 +510,11 @@ struct WreduceWorker
 			for (auto port : mi.query_ports(bit))
 				if (module->selected(port.cell))
 					work_queue_cells.insert(port.cell);
+			for (auto name : queued_cells)
+				if (auto cell = module->cell(name))
+					if (module->selected(cell))
+						work_queue_cells.insert(cell);
+			queued_cells.clear();
 		}
 
 		pool<SigSpec> complete_wires;
