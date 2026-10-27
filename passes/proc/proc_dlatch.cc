@@ -37,6 +37,7 @@ struct proc_dlatch_db_t
 	FfInitVals initvals;
 
 	pool<Cell*> generated_dlatches;
+	vector<Cell*> nomerge_latches;
 	dict<Cell*, vector<SigBit>> mux_srcbits;
 	dict<SigBit, pair<Cell*, int>> mux_drivers;
 	dict<SigBit, int> sigusers;
@@ -434,6 +435,93 @@ struct proc_dlatch_db_t
 	}
 };
 
+static bool latch_wire_is_private(const RTLIL::Wire *wire)
+{
+	if (wire->port_id != 0 || wire->name.isPublic())
+		return false;
+	return true;
+}
+
+// A latch is a state cell, so the later wire walk stops at it and would
+// leave the enable and data muxes mergeable. Stamp the latch and its private
+// combinational input cone here. Public nets and state cells stay shared.
+static void mark_nomerge_latches(proc_dlatch_db_t &db, RTLIL::IdString nomerge,
+		const std::vector<RTLIL::Cell*> &latches)
+{
+	// proc_dlatch may have added connections while converting combinational
+	// processes, so the database's original SigMap can no longer represent the
+	// module's aliases.
+	SigMap sigmap(db.module);
+
+	pool<RTLIL::SigBit> boundary;
+	for (auto wire : db.module->wires()) {
+		if (latch_wire_is_private(wire))
+			continue;
+		for (auto bit : sigmap(wire))
+			if (bit.wire)
+				boundary.insert(bit);
+	}
+
+	dict<RTLIL::SigBit, std::vector<RTLIL::Cell*>> drivers;
+	for (auto cell : db.module->cells()) {
+		if (!db.module->selected(cell))
+			continue;
+		for (auto &conn : cell->connections()) {
+			if (!cell->output(conn.first))
+				continue;
+			for (auto bit : sigmap(conn.second))
+				if (bit.wire)
+					drivers[bit].push_back(cell);
+		}
+	}
+
+	pool<RTLIL::Cell*> seen;
+	std::vector<RTLIL::SigBit> queue;
+	pool<RTLIL::SigBit> queued;
+	auto enqueue_inputs = [&](RTLIL::Cell *cell) {
+		for (auto &conn : cell->connections()) {
+			if (!cell->input(conn.first))
+				continue;
+			for (auto bit : sigmap(conn.second)) {
+				if (!bit.wire || boundary.count(bit))
+					continue;
+				if (queued.insert(bit).second)
+					queue.push_back(bit);
+			}
+		}
+	};
+
+	int marked_inputs = 0;
+	for (auto latch : latches) {
+		latch->set_bool_attribute(nomerge, true);
+		if (!seen.insert(latch).second)
+			continue;
+		enqueue_inputs(latch);
+	}
+
+	for (size_t i = 0; i < queue.size(); i++) {
+		auto found = drivers.find(queue[i]);
+		if (found == drivers.end())
+			continue;
+		for (auto cell : found->second) {
+			if (!seen.insert(cell).second)
+				continue;
+			if (cell->is_builtin_ff())
+				continue;
+			if (cell->type.in(ID($mem), ID($mem_v2), ID($memrd), ID($memrd_v2),
+					ID($memwr), ID($memwr_v2), ID($meminit), ID($meminit_v2)))
+				continue;
+			if (!cell->get_bool_attribute(nomerge)) {
+				cell->set_bool_attribute(nomerge, true);
+				marked_inputs++;
+			}
+			enqueue_inputs(cell);
+		}
+	}
+	if (marked_inputs)
+		log("  marked %d private input cells of (* nomerge *) latches.\n", marked_inputs);
+}
+
 void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc, LatchPolicy policy)
 {
 	RTLIL::IdString nomerge = db.module->twines().find("\\nomerge");
@@ -571,6 +659,8 @@ void proc_dlatch(proc_dlatch_db_t &db, RTLIL::Process *proc, LatchPolicy policy)
 				cell->set_bool_attribute(nomerge, true);
 			if (proc->get_bool_attribute(ID::always_latch))
 				cell->set_bool_attribute(ID::always_latch);
+			if (proc_nomerge)
+				db.nomerge_latches.push_back(cell);
 			db.generated_dlatches.insert(cell);
 
 			if (proc->get_bool_attribute(ID::always_comb))
@@ -640,6 +730,9 @@ struct ProcDlatchPass : public Pass {
 			proc_dlatch_db_t db(mod);
 			for (auto proc : mod->selected_processes())
 				proc_dlatch(db, proc, policy);
+			RTLIL::IdString nomerge = mod->twines().find("\\nomerge");
+			if (nomerge != RTLIL::IdString() && !db.nomerge_latches.empty())
+				mark_nomerge_latches(db, nomerge, db.nomerge_latches);
 			db.fixup_muxes();
 		}
 	}

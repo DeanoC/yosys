@@ -45,9 +45,9 @@ endmodule
 EOT
 hierarchy -top top
 proc
-select -assert-count 2 t:$dlatch a:nomerge
+select -assert-count 2 t:$dlatch a:nomerge %i
 opt_merge
-select -assert-count 2 t:$dlatch a:nomerge
+select -assert-count 2 t:$dlatch a:nomerge %i
 
 design -reset
 

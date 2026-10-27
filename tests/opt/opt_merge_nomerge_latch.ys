@@ -1,0 +1,292 @@
+# (* nomerge *) on a latch process stays on the inferred latch and the
+# private enable/data cone. Unmarked latches, nomerge=0, and public
+# registers that feed those latches still merge.
+
+design -reset
+read_verilog -sv <<EOF
+module top(input en, d, output logic q0, q1);
+  always_latch if (en) q0 <= d;
+  always_latch if (en) q1 <= d;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+opt_merge
+opt_clean
+select -assert-count 1 t:$dlatch
+select -assert-count 0 t:$dlatch a:nomerge %i
+
+design -reset
+read_verilog -sv <<EOF
+module top(input en, d, output logic q0, q1);
+  (* nomerge=1 *) always_latch if (en) q0 <= d;
+  (* nomerge=1 *) always_latch if (en) q1 <= d;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+opt_merge
+opt_clean
+select -assert-count 2 t:$dlatch
+select -assert-count 2 t:$dlatch a:nomerge %i
+
+design -reset
+read_verilog -sv <<EOF
+module top(input en, d, output logic q0, q1);
+  (* nomerge=0 *) always_latch if (en) q0 <= d;
+  (* nomerge=0 *) always_latch if (en) q1 <= d;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+opt_merge
+opt_clean
+select -assert-count 1 t:$dlatch
+select -assert-count 0 t:$dlatch a:nomerge %i
+
+design -reset
+read_verilog -sv <<EOF
+module top(input en, d, output logic q0, q1);
+  (* nomerge=1 *) always_latch if (en) q0 <= d;
+  always_latch if (en) q1 <= d;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+opt_merge
+opt_clean
+select -assert-count 2 t:$dlatch
+select -assert-count 1 t:$dlatch a:nomerge %i
+
+design -reset
+read_verilog -sv <<EOF
+module top(input en, sel, a, b, output logic q0, q1);
+  (* nomerge=1 *) always_latch if (en) q0 <= sel ? a : b;
+  (* nomerge=1 *) always_latch if (en) q1 <= sel ? a : b;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+opt_merge
+opt_clean
+select -assert-count 2 t:$dlatch a:nomerge %i
+select -assert-count 2 t:$mux a:nomerge %i
+
+design -reset
+read_verilog -sv <<EOF
+module top(input en, a, b, output logic q0, q1);
+  (* nomerge=1 *) always_latch if (en) q0 <= a & b;
+  (* nomerge=1 *) always_latch if (en) q1 <= a & b;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+opt_merge
+opt_clean
+select -assert-count 2 t:$dlatch a:nomerge %i
+select -assert-count 2 t:$and a:nomerge %i
+
+design -reset
+read_verilog -sv <<EOF
+module top(input clk, en, d, output logic q0, q1, page_o, page2_o);
+  logic page = 0, page2 = 0;
+  always @(posedge clk) page <= d;
+  always @(posedge clk) page2 <= d;
+  (* nomerge=1 *) always_latch if (en) q0 <= page;
+  (* nomerge=1 *) always_latch if (en) q1 <= page;
+  assign page_o = page;
+  assign page2_o = page2;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+opt_merge
+opt_clean
+select -assert-count 1 t:$dff
+select -assert-count 0 t:$dff a:nomerge %i
+select -assert-count 2 t:$dlatch a:nomerge %i
+
+design -reset
+read_verilog -sv <<EOF
+module top(input clk, en, d, output logic q0, q1);
+  logic page = 0, page2 = 0;
+  always @(posedge clk) page <= d;
+  always @(posedge clk) page2 <= d;
+  (* nomerge=1 *) always_latch if (en) q0 <= page;
+  (* nomerge=1 *) always_latch if (en) q1 <= page2;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+opt_merge
+opt_clean
+select -assert-count 1 t:$dff
+select -assert-count 0 t:$dff a:nomerge %i
+select -assert-count 2 t:$dlatch a:nomerge %i
+
+# Private state feeding marked latches stays mergeable. Run the FF and latch
+# extraction passes separately to make the upstream registers visible first.
+design -reset
+read_verilog -sv <<EOF
+module top(input clk, en, d, output logic q0, q1);
+  logic page0, page1;
+  (* ff_process *) always @(posedge clk) page0 <= d;
+  (* ff_process *) always @(posedge clk) page1 <= d;
+  (* nomerge=1 *) always_latch if (en) q0 <= page0;
+  (* nomerge=1 *) always_latch if (en) q1 <= page1;
+endmodule
+EOF
+hierarchy -top top
+proc_clean
+proc_rmdead
+proc_prune
+proc_init
+proc_arst
+proc_rom
+proc_mux
+select -assert-count 2 p:* a:ff_process %i
+proc_dff p:* a:ff_process %i
+select -clear
+proc_dlatch -latches info
+proc_clean
+opt_merge
+opt_clean
+select -assert-count 1 t:$dff
+select -assert-count 0 t:$dff a:nomerge %i
+select -assert-count 2 t:$dlatch a:nomerge %i
+
+# Latch identity belongs to the latch cell; marking its output wire could
+# also protect other drivers that share an aliased output net.
+design -reset
+read_verilog -sv <<EOF
+module top(input en, d, output logic q0, q1);
+  (* nomerge=1 *) always_latch if (en) q0 <= d;
+  (* nomerge=1 *) always_latch if (en) q1 <= d;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+select -assert-count 0 w:q0 a:nomerge %i
+select -assert-count 0 w:q1 a:nomerge %i
+select -assert-count 2 t:$dlatch a:nomerge %i
+
+design -reset
+read_verilog -sv <<EOF
+module top(input en, d, output logic q0, q1);
+  (* nomerge=1 *) always @* if (en) q0 <= d;
+  (* nomerge=1 *) always @* if (en) q1 <= d;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+opt_merge
+opt_clean
+select -assert-count 2 t:$dlatch a:nomerge %i
+
+design -reset
+read_verilog -sv <<EOF
+module top(input en, d, output logic q0, q1);
+  always @* if (en) q0 <= d;
+  always @* if (en) q1 <= d;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+opt_merge
+opt_clean
+select -assert-count 1 t:$dlatch
+select -assert-count 0 t:$dlatch a:nomerge %i
+
+design -reset
+read_verilog -sv <<EOF
+module top(input en, rn, d, output logic q0, q1);
+  (* nomerge=1 *) always @* if (!rn) q0 <= 0; else if (en) q0 <= d;
+  (* nomerge=1 *) always @* if (!rn) q1 <= 0; else if (en) q1 <= d;
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+opt_merge
+opt_clean
+select -assert-count 2 t:$adlatch a:nomerge %i
+
+# The latch cone follows aliases added when combinational processes are
+# converted to module connections during proc_dlatch.
+design -reset
+read_verilog -sv <<EOF
+module top(input en, a, b, output logic q);
+  logic leaf, alias;
+  always_comb leaf = a & b;
+  always_comb alias = leaf;
+  (* nomerge=1 *) always_latch if (en) q <= alias;
+endmodule
+EOF
+hierarchy -top top
+rename -hide top/leaf top/alias
+proc -latches info
+select -assert-count 1 t:$and a:nomerge %i
+
+# A private keep wire does not cut the latch's private input cone.
+design -reset
+read_verilog -sv <<EOF
+module top(input en, a, b, output logic q0, q1);
+  (* keep *) logic h0, h1;
+  always_comb h0 = a & b;
+  always_comb h1 = a & b;
+  (* nomerge=1 *) always_latch if (en) q0 <= h0;
+  (* nomerge=1 *) always_latch if (en) q1 <= h1;
+endmodule
+EOF
+hierarchy -top top
+rename -hide top/h0 top/h1
+proc -latches info
+select -assert-count 2 t:$and a:nomerge %i
+
+# Driver cells outside a partial selection are not stamped by the cone walk.
+design -reset
+read_verilog -sv <<EOF
+module top(input en, a, b, output logic q);
+  logic data;
+  always_comb data = a & b;
+  (* nomerge=1 *) always_latch if (en) q <= data;
+endmodule
+EOF
+hierarchy -top top
+rename -hide top/data
+proc_clean
+proc_rmdead
+proc_prune
+proc_init
+proc_arst
+proc_rom
+proc_mux
+select -set comb p:* a:always_comb %i
+select -assert-count 1 @comb
+proc_dlatch @comb
+select -clear
+select -set marked p:* a:nomerge %i
+select -assert-count 1 @marked
+proc_dlatch @marked
+select -clear
+select -assert-count 1 t:$dlatch a:nomerge %i
+select -assert-count 2 t:$and
+select -assert-count 0 t:$and a:nomerge %i
+
+# Memory-backed latch inputs stop at the memory read cell.
+design -reset
+read_verilog -sv <<EOF
+module top(input clk, en, we, input [1:0] addr, input [7:0] d,
+           output logic [7:0] q);
+  logic [7:0] mem [0:3];
+  always @(posedge clk)
+    if (we) mem[addr] <= d;
+  (* nomerge=1 *) always_latch if (en) q <= mem[addr];
+endmodule
+EOF
+hierarchy -top top
+proc -latches info
+memory_collect
+select -assert-count 1 t:$mem_v2
+select -assert-none t:$mem_v2 a:nomerge %i
+select -assert-none t:$memrd_v2 a:nomerge %i
+select -assert-none t:$memwr_v2 a:nomerge %i
