@@ -36,6 +36,21 @@ select -assert-count 1 t:$dlatch a:always_latch %i
 
 design -reset
 
+# nomerge on always_latch processes must survive proc and prevent opt_merge.
+read_verilog -sv <<EOT
+module top(input en, d, output reg q0, q1);
+(* nomerge=1 *) always_latch if (en) q0 <= d;
+(* nomerge=1 *) always_latch if (en) q1 <= d;
+endmodule
+EOT
+hierarchy -top top
+proc
+select -assert-count 2 t:$dlatch a:nomerge %i
+opt_merge
+select -assert-count 2 t:$dlatch a:nomerge %i
+
+design -reset
+
 # error
 read_verilog <<EOT
 module top(input g, rn, d, output reg q);
