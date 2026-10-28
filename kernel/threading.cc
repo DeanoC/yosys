@@ -40,10 +40,20 @@ void DeferredLogs::flush()
 			YOSYS_NAMESPACE_PREFIX log("%s", m.text.c_str());
 }
 
+#ifdef YOSYS_ENABLE_THREADS
+// glibc answers hardware_concurrency() by reading /sys/devices/system/cpu/online,
+// and opt_clean sizes a pool per module per pass: read it once.
+static int get_hardware_threads()
+{
+	static int hardware_threads = std::thread::hardware_concurrency();
+	return hardware_threads;
+}
+#endif
+
 int ThreadPool::pool_size(int reserved_cores, int max_worker_threads)
 {
 #ifdef YOSYS_ENABLE_THREADS
-	int available_threads = std::min<int>(std::thread::hardware_concurrency(), get_max_threads());
+	int available_threads = std::min<int>(get_hardware_threads(), get_max_threads());
 	int num_threads = std::min(available_threads - reserved_cores, max_worker_threads);
 	return std::max(0, num_threads);
 #else
