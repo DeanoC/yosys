@@ -596,11 +596,16 @@ struct RenamePass : public Pass {
 					return name[0] == '\\' && VERILOG_BACKEND::id_is_verilog_escaped(name.substr(1));
 				};
 
-				for (auto wire : module->selected_wires())
+				// The selection is by name, so take it before anything is renamed.
+				std::vector<RTLIL::Wire*> wires = module->selected_wires();
+				std::vector<RTLIL::Cell*> cells = module->selected_cells();
+				std::vector<RTLIL::Memory*> memories = module->selected_memories();
+
+				for (auto wire : wires)
 					if (escaped(wire->name.str()))
 						module->rename(wire, new_name(wire->name.str().substr(1)));
 
-				for (auto cell : module->selected_cells()) {
+				for (auto cell : cells) {
 					std::string name = cell->name.str();
 					bool own_memid = cell->type.in(ID($mem), ID($mem_v2)) &&
 							cell->getParam(ID::MEMID).decode_string() == name;
@@ -616,7 +621,7 @@ struct RenamePass : public Pass {
 					}
 				}
 
-				for (auto cell : module->selected_cells()) {
+				for (auto cell : cells) {
 					if (!cell->type.in(ID($mem), ID($mem_v2)))
 						continue;
 					std::string memid = cell->getParam(ID::MEMID).decode_string();
@@ -628,17 +633,24 @@ struct RenamePass : public Pass {
 					memids.insert(renamed);
 				}
 
-				for (auto memory : module->selected_memories()) {
+				for (auto memory : memories) {
 					std::string old_name = memory->name.str();
 					if (!escaped(old_name))
 						continue;
 					std::string renamed = new_name(old_name.substr(1));
+					IdString renamed_id = module->twines().add(renamed);
 					module->memories.erase(memory->name);
-					memory->name = module->twines().add(renamed);
-					module->memories[memory->name] = memory;
+					memory->name = renamed_id;
+					module->memories[renamed_id] = memory;
 					for (auto cell : module->cells())
 						if (cell->has_memid() && cell->getParam(ID::MEMID).decode_string() == old_name)
 							cell->setParam(ID::MEMID, Const(renamed));
+					// Writes that proc has not yet turned into $memwr cells.
+					for (auto &it : module->processes)
+						for (auto sync : it.second->syncs)
+							for (auto &action : sync->mem_write_actions)
+								if (module->twines().str(action.memid) == old_name)
+									action.memid = renamed_id;
 				}
 
 				module->fixup_ports();

@@ -124,3 +124,36 @@ select -assert-none m:u0.pal
 select -assert-count 2 r:MEMID=\u0_pal
 memory_collect
 check -assert
+
+# An unpacked memory renamed before proc keeps its process writes
+design -reset
+read_verilog <<EOT
+module top(input clk, input [1:0] a, input [7:0] d, input we, output [7:0] q);
+    reg [7:0] \u0.pal [0:3];
+    always @(posedge clk) if (we) \u0.pal [a] <= d;
+    assign q = \u0.pal [a];
+endmodule
+EOT
+rename -unescape
+select -assert-count 1 m:u0_pal
+proc
+select -assert-count 1 t:$memwr_v2 r:MEMID=\u0_pal %i
+memory_collect
+select -assert-count 1 t:$mem_v2 r:MEMID=\u0_pal %i
+check -assert
+
+# A selected packed memory whose cell name and MEMID differ: both are renamed
+design -reset
+read_verilog <<EOT
+module top(input clk, input [1:0] a, input [7:0] d, input we, output [7:0] q);
+    reg [7:0] \u0.pal [0:3];
+    always @(posedge clk) if (we) \u0.pal [a] <= d;
+    assign q = \u0.pal [a];
+endmodule
+EOT
+proc
+memory_collect
+setparam -set MEMID "\m.id" c:u0.pal
+select -assert-count 1 c:u0.pal r:MEMID=\m.id %i
+rename -unescape c:u0.pal
+select -assert-count 1 c:u0_pal r:MEMID=\m_id %i
