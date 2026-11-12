@@ -215,7 +215,7 @@ static std::string renamed_unescaped(const std::string& str)
 			new_str += c;
 	}
 
-	if (VERILOG_BACKEND::verilog_keywords().count(str))
+	if (VERILOG_BACKEND::verilog_keywords().count(new_str))
 		new_str += "_";
 
 	return new_str;
@@ -293,8 +293,10 @@ struct RenamePass : public Pass {
 		log("\n");
 		log("    rename -unescape [selection]\n");
 		log("\n");
-		log("Rename all selected public wires and cells that have to be escaped in Verilog.\n");
-		log("Replaces characters with underscores or adds additional underscores and numbers.\n");
+		log("Rename all selected public wires, cells and memories that have to be escaped in\n");
+		log("Verilog. Replaces characters with underscores or adds additional underscores and\n");
+		log("numbers. Every new name is unique in the module, including among the names this\n");
+		log("command assigns. A $mem/$mem_v2 cell named after its MEMID keeps that pairing.\n");
 		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -568,40 +570,76 @@ struct RenamePass : public Pass {
 
 			for (auto module : design->selected_modules())
 			{
-				dict<RTLIL::Wire *, IdString> new_wire_names;
-				dict<RTLIL::Cell *, IdString> new_cell_names;
+				// write_verilog declares a memory as a reg named after its MEMID, so
+				// the names of packed memories share the namespace with wires,
+				// cells and unpacked memories.
+				pool<std::string> memids;
+				for (auto cell : module->cells())
+					if (cell->type.in(ID($mem), ID($mem_v2)))
+						memids.insert(cell->getParam(ID::MEMID).decode_string());
 
-				for (auto wire : module->selected_wires()) {
-					auto name = wire->name.str();
-					if (name[0] != '\\')
+				// Names are assigned one at a time, so each new name is checked
+				// against the names given earlier in the same run.
+				auto new_name = [&](const std::string &name) {
+					std::string base = "\\" + renamed_unescaped(name);
+					std::string candidate = base;
+					for (int index = 1; module->count_id(module->twines().find(candidate)) ||
+							memids.count(candidate); index++)
+						candidate = stringf("%s_%d", base, index);
+					std::string plain = candidate.substr(1);
+					if (VERILOG_BACKEND::id_is_verilog_escaped(plain))
+						log_error("Failed to rename %s -> %s\n", name, plain);
+					return candidate;
+				};
+
+				auto escaped = [](const std::string &name) {
+					return name[0] == '\\' && VERILOG_BACKEND::id_is_verilog_escaped(name.substr(1));
+				};
+
+				for (auto wire : module->selected_wires())
+					if (escaped(wire->name.str()))
+						module->rename(wire, new_name(wire->name.str().substr(1)));
+
+				for (auto cell : module->selected_cells()) {
+					std::string name = cell->name.str();
+					bool own_memid = cell->type.in(ID($mem), ID($mem_v2)) &&
+							cell->getParam(ID::MEMID).decode_string() == name;
+					if (!escaped(name))
 						continue;
-					name = name.substr(1);
-					if (!VERILOG_BACKEND::id_is_verilog_escaped(name))
-						continue;
-					new_wire_names[wire] = module->uniquify("\\" + renamed_unescaped(name));
-					auto new_name = module->twines().str(new_wire_names[wire]).substr(1);
-					if (VERILOG_BACKEND::id_is_verilog_escaped(new_name))
-						log_error("Failed to rename wire %s -> %s\n", name, new_name);
+					if (own_memid)
+						memids.erase(name);
+					std::string renamed = new_name(name.substr(1));
+					module->rename(cell, renamed);
+					if (own_memid) {
+						cell->setParam(ID::MEMID, Const(renamed));
+						memids.insert(renamed);
+					}
 				}
 
 				for (auto cell : module->selected_cells()) {
-					auto name = cell->name.str();
-					if (name[0] != '\\')
+					if (!cell->type.in(ID($mem), ID($mem_v2)))
 						continue;
-					name = name.substr(1);
-					if (!VERILOG_BACKEND::id_is_verilog_escaped(name))
+					std::string memid = cell->getParam(ID::MEMID).decode_string();
+					if (!escaped(memid))
 						continue;
-					new_cell_names[cell] = module->uniquify("\\" + renamed_unescaped(name));
-					auto new_name = module->twines().str(new_cell_names[cell]).substr(1);
-					if (VERILOG_BACKEND::id_is_verilog_escaped(new_name))
-						log_error("Failed to rename cell %s -> %s\n", name, new_name);
+					memids.erase(memid);
+					std::string renamed = new_name(memid.substr(1));
+					cell->setParam(ID::MEMID, Const(renamed));
+					memids.insert(renamed);
 				}
 
-				for (auto &it : new_wire_names)
-					module->rename(it.first, it.second);
-
-				for (auto &it : new_cell_names)
-					module->rename(it.first, it.second);
+				for (auto memory : module->selected_memories()) {
+					std::string old_name = memory->name.str();
+					if (!escaped(old_name))
+						continue;
+					std::string renamed = new_name(old_name.substr(1));
+					module->memories.erase(memory->name);
+					memory->name = module->twines().add(renamed);
+					module->memories[memory->name] = memory;
+					for (auto cell : module->cells())
+						if (cell->has_memid() && cell->getParam(ID::MEMID).decode_string() == old_name)
+							cell->setParam(ID::MEMID, Const(renamed));
+				}
 
 				module->fixup_ports();
 			}

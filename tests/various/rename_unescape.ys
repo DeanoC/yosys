@@ -54,3 +54,73 @@ EOT
 
 rename -unescape
 check
+
+# Two escaped names that map to the same new name in one run, as a
+# flattened cpu.ex_out wire beside a flattened cpu.ex.out port
+design -reset
+read_verilog <<EOT
+module ex(input i, output out);
+    assign out = ~i;
+endmodule
+module cpu(input i, output o);
+    wire ex_out;
+    ex ex (.i(i), .out(ex_out));
+    assign o = ex_out;
+endmodule
+module top(input i, output o);
+    cpu cpu (.i(i), .o(o));
+endmodule
+EOT
+hierarchy -top top
+flatten
+select -assert-count 1 w:cpu.ex_out
+select -assert-count 1 w:cpu.ex.out
+rename -unescape
+select -assert-count 1 w:cpu_ex_out
+select -assert-count 1 w:cpu_ex_out_1
+select -assert-none w:cpu.*
+check -assert
+
+# A new name that is itself a keyword
+design -reset
+read_verilog -sv <<EOT
+module top();
+    wire \always.ff ;
+endmodule
+EOT
+rename -unescape
+select -assert-count 1 w:always_ff_
+
+# A packed memory keeps its cell name and MEMID together
+design -reset
+read_verilog <<EOT
+module top(input clk, input [1:0] a, input [7:0] d, input we, output [7:0] q);
+    reg [7:0] \u0.pal [0:3];
+    always @(posedge clk) if (we) \u0.pal [a] <= d;
+    assign q = \u0.pal [a];
+endmodule
+EOT
+proc
+memory_collect
+select -assert-count 1 c:u0.pal
+rename -unescape
+select -assert-count 1 c:u0_pal r:MEMID=\u0_pal %i
+check -assert
+
+# An unpacked memory and the MEMID of its port cells
+design -reset
+read_verilog <<EOT
+module top(input clk, input [1:0] a, input [7:0] d, input we, output [7:0] q);
+    reg [7:0] \u0.pal [0:3];
+    always @(posedge clk) if (we) \u0.pal [a] <= d;
+    assign q = \u0.pal [a];
+endmodule
+EOT
+proc
+select -assert-count 1 m:u0.pal
+rename -unescape
+select -assert-count 1 m:u0_pal
+select -assert-none m:u0.pal
+select -assert-count 2 r:MEMID=\u0_pal
+memory_collect
+check -assert
