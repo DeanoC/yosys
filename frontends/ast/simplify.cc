@@ -3880,6 +3880,43 @@ skip_dynamic_range_lvalue_expansion:;
 			newNode->children.push_back(std::make_unique<AstNode>(location, AST_ASSIGN_EQ, std::move(wire_tmp_id_owned), children[1]->clone()));
 			newNode->children.back()->was_checked = true;
 
+			std::function<void(AstNode*)> capture_dynamic_indices = [&](AstNode *n) {
+				if (n->type == AST_CONCAT) {
+					for (auto &c : n->children)
+						capture_dynamic_indices(c.get());
+					return;
+				}
+				if (n->type != AST_IDENTIFIER || n->id2ast == nullptr)
+					return;
+				for (auto &c : n->children) {
+					if (c->type != AST_RANGE || c->range_valid || c->children.empty())
+						continue;
+					int res_w = 1;
+					if (!try_determine_range_width(c.get(), res_w))
+						continue;
+					AstNode *base_expr = c->children.size() >= 2 ? c->children[1].get() : c->children[0].get();
+					if (base_expr->type == AST_CONSTANT)
+						continue;
+					int idx_w = -1;
+					bool idx_s = true;
+					base_expr->detectSignWidth(idx_w, idx_s);
+					if (idx_w <= 0)
+						continue;
+					auto pos = mktemp_logic(location, "$splitcmplxidx$", current_ast_mod, true, idx_w - 1, 0, idx_s);
+					current_scope[pos->str] = pos->id2ast;
+					auto capture = std::make_unique<AstNode>(location, AST_ASSIGN_EQ, pos->clone(), base_expr->clone());
+					capture->was_checked = true;
+					newNode->children.push_back(std::move(capture));
+					if (c->children.size() >= 2) {
+						c->children[0] = std::make_unique<AstNode>(location, AST_ADD, pos->clone(), mkconst_int(location, res_w - 1, true));
+						c->children[1] = std::move(pos);
+					} else {
+						c->children[0] = std::move(pos);
+					}
+				}
+			};
+
+			std::vector<std::unique_ptr<AstNode>> member_assigns;
 			int cursor = 0;
 			for (auto& child : children[0]->children)
 			{
@@ -3887,12 +3924,18 @@ skip_dynamic_range_lvalue_expansion:;
 				bool child_sign_hint = true;
 				child->detectSignWidth(child_width_hint, child_sign_hint);
 
+				auto lhs_member = child->clone();
+				if (type == AST_ASSIGN_EQ)
+					capture_dynamic_indices(lhs_member.get());
+
 				auto rhs = wire_tmp_id->clone();
 				rhs->children.push_back(std::make_unique<AstNode>(location, AST_RANGE, AstNode::mkconst_int(location, cursor+child_width_hint-1, true), AstNode::mkconst_int(location, cursor, true)));
-				newNode->children.push_back(std::make_unique<AstNode>(location, type, child->clone(), std::move(rhs)));
+				member_assigns.push_back(std::make_unique<AstNode>(location, type, std::move(lhs_member), std::move(rhs)));
 
 				cursor += child_width_hint;
 			}
+			for (auto &stmt : member_assigns)
+				newNode->children.push_back(std::move(stmt));
 
 			goto apply_newNode;
 		}

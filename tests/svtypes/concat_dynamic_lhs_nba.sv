@@ -103,4 +103,32 @@ module top (
 	end
 	always_comb assert(c_lo == c_lo_ref);
 	always_comb assert(c_hi == c_hi_ref);
+
+	// Blocking concat that also writes its own dynamic index variable:
+	// all dynamic LHS indices must be evaluated before any member is updated.
+	logic [1:0][1:0] c_self_arr;
+	logic            c_self_idx;
+	always_comb begin
+		c_self_arr = 4'b0000;
+		c_self_idx = 1'b0;
+		{c_self_arr[c_self_idx], c_self_idx} = 3'b101;
+	end
+	always_comb assert(c_self_idx == 1'b1);
+	always_comb assert(c_self_arr[0] == 2'b10);
+	always_comb assert(c_self_arr[1] == 2'b00);
+
+	// Symbolic initial index with blocking self-index update
+	logic [3:0][7:0] c_sym_arr, c_sym_ref;
+	logic [1:0]      c_sym_idx, c_sym_ref_idx;
+	always_comb begin
+		c_sym_arr = 32'h11223344;
+		c_sym_idx = i;
+		{c_sym_arr[c_sym_idx], c_sym_idx} = {d[7:0], i ^ 2'b11};
+
+		c_sym_ref = 32'h11223344;
+		c_sym_ref[i] = d[7:0];
+		c_sym_ref_idx = i ^ 2'b11;
+	end
+	always_comb assert(c_sym_arr == c_sym_ref);
+	always_comb assert(c_sym_idx == c_sym_ref_idx);
 endmodule
