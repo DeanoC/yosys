@@ -1073,8 +1073,8 @@ void AstNode::detectSignWidthWorker(int &width_hint, bool &sign_hint, bool *foun
 			if (range->children.size() == 1)
 				this_width = 1;
 			else if (!range->range_valid) {
-				auto left_at_zero_ast = children[0]->children[0]->clone_at_zero();
-				auto right_at_zero_ast = children[0]->children.size() >= 2 ? children[0]->children[1]->clone_at_zero() : left_at_zero_ast->clone();
+				auto left_at_zero_ast = range->children[0]->clone_at_zero();
+				auto right_at_zero_ast = range->children.size() >= 2 ? range->children[1]->clone_at_zero() : left_at_zero_ast->clone();
 				while (left_at_zero_ast->simplify(true, 1, -1, false)) { }
 				while (right_at_zero_ast->simplify(true, 1, -1, false)) { }
 				if (left_at_zero_ast->type != AST_CONSTANT || right_at_zero_ast->type != AST_CONSTANT)
