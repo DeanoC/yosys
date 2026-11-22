@@ -440,4 +440,53 @@ TEST_F(ThreadingTest, ConcurrentWorkQueueParallel) {
 	EXPECT_EQ(sum.load(), 1090);
 }
 
+TEST_F(ThreadingTest, DictConcurrentLookupAtRehashBoundary) {
+	ParallelDispatchThreadPool pool(4);
+	// Sizes 12, 30, 51 sit right at dict's rehash trigger boundaries (prime / 2 + 1).
+	for (int n : {12, 30, 51}) {
+		dict<std::string, int> d;
+		for (int i = 0; i < n; ++i)
+			d["key_" + std::to_string(i)] = i;
+
+		std::atomic<int> total{0};
+		pool.run([&d, n, &total](const ParallelDispatchThreadPool::RunCtx &ctx) {
+			int local = 0;
+			for (int i = 0; i < n; ++i) {
+				std::string k = "key_" + std::to_string((i + ctx.thread_num) % n);
+				if (d.count(k)) {
+					EXPECT_EQ(d.at(k), (i + ctx.thread_num) % n);
+					EXPECT_EQ(d.find(k)->second, (i + ctx.thread_num) % n);
+					local += d[k];
+				}
+			}
+			total.fetch_add(local, std::memory_order_relaxed);
+		});
+
+		int expected = (n * (n - 1) / 2) * pool.num_threads();
+		EXPECT_EQ(total.load(), expected);
+	}
+}
+
+TEST_F(ThreadingTest, PoolConcurrentLookupAtRehashBoundary) {
+	ParallelDispatchThreadPool thread_pool(4);
+	for (int n : {12, 30, 51}) {
+		pool<std::string> p;
+		for (int i = 0; i < n; ++i)
+			p.insert("key_" + std::to_string(i));
+
+		std::atomic<int> found{0};
+		thread_pool.run([&p, n, &found](const ParallelDispatchThreadPool::RunCtx &ctx) {
+			int local = 0;
+			for (int i = 0; i < n; ++i) {
+				std::string k = "key_" + std::to_string((i + ctx.thread_num) % n);
+				if (p.count(k) && p[k] && p.find(k) != p.end())
+					++local;
+			}
+			found.fetch_add(local, std::memory_order_relaxed);
+		});
+
+		EXPECT_EQ(found.load(), n * thread_pool.num_threads());
+	}
+}
+
 YOSYS_NAMESPACE_END

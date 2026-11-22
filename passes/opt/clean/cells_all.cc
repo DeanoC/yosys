@@ -247,7 +247,9 @@ struct MemAnalysis {
 void fixup_unused_cells_and_mems(CellAnalysis& analysis, MemAnalysis& mem_analysis, CellTraversal& traversal, AnalysisContext& actx, CleanRunContext &clean_ctx) {
 	// Processes the cell queue in batches, traversing input cones by enqueuing more cells
 	// Discover and mark used memories and cells
-	actx.subpool.run([&analysis, &mem_analysis, &traversal, &actx, &clean_ctx](const ParallelDispatchThreadPool::RunCtx &ctx) {
+	const auto &mem_indices = mem_analysis.indices;
+	const auto &mem2cells = traversal.mem2cells;
+	actx.subpool.run([&analysis, &mem_analysis, &mem_indices, &mem2cells, &traversal, &actx, &clean_ctx](const ParallelDispatchThreadPool::RunCtx &ctx) {
 		pool<SigBit> bits;
 		pool<std::string> mems;
 		while (true) {
@@ -263,8 +265,9 @@ void fixup_unused_cells_and_mems(CellAnalysis& analysis, MemAnalysis& mem_analys
 
 				if (cell->type.in(ID($memrd), ID($memrd_v2))) {
 					std::string mem_id = cell->getParam(ID::MEMID).decode_string();
-					if (mem_analysis.indices.count(mem_id)) {
-						int mem_index = mem_analysis.indices[mem_id];
+					auto it = mem_indices.find(mem_id);
+					if (it != mem_indices.end()) {
+						int mem_index = it->second;
 						// Memory fixup
 						if (mem_analysis.unused[mem_index].exchange(false, std::memory_order_relaxed))
 							mems.insert(mem_id);
@@ -282,10 +285,11 @@ void fixup_unused_cells_and_mems(CellAnalysis& analysis, MemAnalysis& mem_analys
 			bits.clear();
 
 			for (auto mem : mems) {
-				if (traversal.mem2cells.count(mem) == 0)
+				auto it = mem2cells.find(mem);
+				if (it == mem2cells.end())
 					continue;
 				// Cells fixup
-				for (int cell_idx : traversal.mem2cells.at(mem))
+				for (int cell_idx : it->second)
 					analysis.mark_used_and_enqueue(cell_idx, traversal.queue, ctx);
 			}
 			mems.clear();
