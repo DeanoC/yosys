@@ -44,7 +44,7 @@ runs:
       id: restore-iverilog
       with:
         path: .local/
-        key: ${{ inputs.runs-on }}-${{ steps.get-iverilog.outputs.IVERILOG_GIT }}
+        key: ${{ inputs.runs-on }}-${{ steps.get-iverilog.outputs.IVERILOG_GIT }}-yybuf16k
 
     - name: Build iverilog
       if: steps.restore-iverilog.outputs.cache-hit != 'true'
@@ -53,7 +53,10 @@ runs:
         mkdir -p ${{ github.workspace }}/.local/
         cd iverilog
         autoconf
-        CC=gcc CXX=g++ ./configure --prefix=${{ github.workspace }}/.local
+        # Flex 2.6.15+ defaults YY_READ_BUF_SIZE to BUFSIZ (1024 on macOS),
+        # shrinking YY_BUF_SIZE to 2048 bytes; iverilog's lexers use REJECT
+        # so they cannot grow the buffer dynamically for wide Verilog literals.
+        CC=gcc CXX=g++ CPPFLAGS="-DYY_READ_BUF_SIZE=8192 -DYY_BUF_SIZE=16384" ./configure --prefix=${{ github.workspace }}/.local
         make -j$procs
         make install
 
