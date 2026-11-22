@@ -1,4 +1,8 @@
-if (NOT FLEX_INCLUDE_DIRS)
+get_filename_component(_flex_bin_dir "${FLEX_EXECUTABLE}" DIRECTORY)
+get_filename_component(_flex_prefix "${_flex_bin_dir}" DIRECTORY)
+if (EXISTS "${_flex_prefix}/include/FlexLexer.h")
+	set(FLEX_INCLUDE_DIRS "${_flex_prefix}/include")
+elseif (NOT FLEX_INCLUDE_DIRS)
 	set(FLEX_INCLUDE_DIRS ${YOSYS_CMAKE_SOURCE_DIR}/libs/flex)
 endif()
 
