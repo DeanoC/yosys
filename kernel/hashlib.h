@@ -499,21 +499,11 @@ class HASHLIB_ATTRIBUTE_WARN_UNUSED dict {
 		return 1;
 	}
 
-	int do_lookup(const K &key, Hasher::hash_t &hash)
+	int do_lookup(const K &key, Hasher::hash_t hash) const
 	{
 		if (hashtable.empty())
 			return -1;
 
-		if (entries.size() * hashtable_size_trigger > hashtable.size()) {
-			do_rehash();
-			hash = do_hash(key);
-		}
-
-		return do_lookup_internal(key, hash);
-	}
-
-	int do_lookup_internal(const K &key, Hasher::hash_t hash) const
-	{
 		int index = hashtable[hash];
 
 		while (index >= 0 && !ops.cmp(entries[index].udata.first, key)) {
@@ -524,17 +514,9 @@ class HASHLIB_ATTRIBUTE_WARN_UNUSED dict {
 		return index;
 	}
 
-	int do_lookup_no_rehash(const K &key, Hasher::hash_t hash) const
-	{
-		if (hashtable.empty())
-			return -1;
-
-		return do_lookup_internal(key, hash);
-	}
-
 	int do_insert(const K &key, const Hasher::hash_t &hash)
 	{
-		if (hashtable.empty()) {
+		if (hashtable.empty() || (entries.size() + 1) * hashtable_size_trigger > hashtable.size()) {
 			entries.emplace_back(std::pair<K, T>(key, T()), -1);
 			do_rehash();
 		} else {
@@ -546,7 +528,7 @@ class HASHLIB_ATTRIBUTE_WARN_UNUSED dict {
 
 	int do_insert(const std::pair<K, T> &value, const Hasher::hash_t &hash)
 	{
-		if (hashtable.empty()) {
+		if (hashtable.empty() || (entries.size() + 1) * hashtable_size_trigger > hashtable.size()) {
 			entries.emplace_back(value, -1);
 			do_rehash();
 		} else {
@@ -558,7 +540,7 @@ class HASHLIB_ATTRIBUTE_WARN_UNUSED dict {
 
 	int do_insert(std::pair<K, T> &&rvalue, const Hasher::hash_t &hash)
 	{
-		if (hashtable.empty()) {
+		if (hashtable.empty() || (entries.size() + 1) * hashtable_size_trigger > hashtable.size()) {
 			entries.emplace_back(std::forward<std::pair<K, T>>(rvalue), -1);
 			do_rehash();
 		} else {
@@ -761,14 +743,14 @@ public:
 	int count(const K &key) const
 	{
 		Hasher::hash_t hash = do_hash(key);
-		int i = do_lookup_no_rehash(key, hash);
+		int i = do_lookup(key, hash);
 		return i < 0 ? 0 : 1;
 	}
 
 	int count(const K &key, const_iterator it) const
 	{
 		Hasher::hash_t hash = do_hash(key);
-		int i = do_lookup_no_rehash(key, hash);
+		int i = do_lookup(key, hash);
 		return i < 0 || i > it.index ? 0 : 1;
 	}
 
@@ -784,7 +766,7 @@ public:
 	const_iterator find(const K &key) const
 	{
 		Hasher::hash_t hash = do_hash(key);
-		int i = do_lookup_no_rehash(key, hash);
+		int i = do_lookup(key, hash);
 		if (i < 0)
 			return end();
 		return const_iterator(this, i);
@@ -802,7 +784,7 @@ public:
 	const T& at(const K &key) const
 	{
 		Hasher::hash_t hash = do_hash(key);
-		int i = do_lookup_no_rehash(key, hash);
+		int i = do_lookup(key, hash);
 		if (i < 0)
 			throw std::out_of_range("dict::at()");
 		return entries[i].udata.second;
@@ -811,7 +793,7 @@ public:
 	const T& at(const K &key, const T &defval) const
 	{
 		Hasher::hash_t hash = do_hash(key);
-		int i = do_lookup_no_rehash(key, hash);
+		int i = do_lookup(key, hash);
 		if (i < 0)
 			return defval;
 		return entries[i].udata.second;
@@ -974,21 +956,11 @@ protected:
 		return 1;
 	}
 
-	int do_lookup(const K &key, Hasher::hash_t &hash)
+	int do_lookup(const K &key, Hasher::hash_t hash) const
 	{
 		if (hashtable.empty())
 			return -1;
 
-		if (entries.size() * hashtable_size_trigger > hashtable.size()) {
-			do_rehash();
-			hash = do_hash(key);
-		}
-
-		return do_lookup_internal(key, hash);
-	}
-
-	int do_lookup_internal(const K &key, Hasher::hash_t hash) const
-	{
 		int index = hashtable[hash];
 
 		while (index >= 0 && !ops.cmp(entries[index].udata, key)) {
@@ -999,20 +971,11 @@ protected:
 		return index;
 	}
 
-	int do_lookup_no_rehash(const K &key, Hasher::hash_t hash) const
+	int do_insert(const K &value, const Hasher::hash_t &hash)
 	{
-		if (hashtable.empty())
-			return -1;
-
-		return do_lookup_internal(key, hash);
-	}
-
-	int do_insert(const K &value, Hasher::hash_t &hash)
-	{
-		if (hashtable.empty()) {
+		if (hashtable.empty() || (entries.size() + 1) * hashtable_size_trigger > hashtable.size()) {
 			entries.emplace_back(value, -1);
 			do_rehash();
-			hash = do_hash(value);
 		} else {
 			entries.emplace_back(value, hashtable[hash]);
 			hashtable[hash] = entries.size() - 1;
@@ -1020,12 +983,11 @@ protected:
 		return entries.size() - 1;
 	}
 
-	int do_insert(K &&rvalue, Hasher::hash_t &hash)
+	int do_insert(K &&rvalue, const Hasher::hash_t &hash)
 	{
-		if (hashtable.empty()) {
+		if (hashtable.empty() || (entries.size() + 1) * hashtable_size_trigger > hashtable.size()) {
 			entries.emplace_back(std::forward<K>(rvalue), -1);
 			do_rehash();
-			hash = do_hash(entries.back().udata);
 		} else {
 			entries.emplace_back(std::forward<K>(rvalue), hashtable[hash]);
 			hashtable[hash] = entries.size() - 1;
@@ -1168,14 +1130,14 @@ public:
 	int count(const K &key) const
 	{
 		Hasher::hash_t hash = do_hash(key);
-		int i = do_lookup_no_rehash(key, hash);
+		int i = do_lookup(key, hash);
 		return i < 0 ? 0 : 1;
 	}
 
 	int count(const K &key, const_iterator it) const
 	{
 		Hasher::hash_t hash = do_hash(key);
-		int i = do_lookup_no_rehash(key, hash);
+		int i = do_lookup(key, hash);
 		return i < 0 || i > it.index ? 0 : 1;
 	}
 
@@ -1191,7 +1153,7 @@ public:
 	const_iterator find(const K &key) const
 	{
 		Hasher::hash_t hash = do_hash(key);
-		int i = do_lookup_no_rehash(key, hash);
+		int i = do_lookup(key, hash);
 		if (i < 0)
 			return end();
 		return const_iterator(this, i);
@@ -1303,7 +1265,7 @@ public:
 	int at(const K &key) const
 	{
 		Hasher::hash_t hash = database.do_hash(key);
-		int i = database.do_lookup_no_rehash(key, hash);
+		int i = database.do_lookup(key, hash);
 		if (i < 0)
 			throw std::out_of_range("idict::at()");
 		return i + offset;
@@ -1312,7 +1274,7 @@ public:
 	int at(const K &key, int defval) const
 	{
 		Hasher::hash_t hash = database.do_hash(key);
-		int i = database.do_lookup_no_rehash(key, hash);
+		int i = database.do_lookup(key, hash);
 		if (i < 0)
 			return defval;
 		return i + offset;
@@ -1321,14 +1283,14 @@ public:
 	int count(const K &key) const
 	{
 		Hasher::hash_t hash = database.do_hash(key);
-		int i = database.do_lookup_no_rehash(key, hash);
+		int i = database.do_lookup(key, hash);
 		return i < 0 ? 0 : 1;
 	}
 
 	int lookup(const K &key) const
 	{
 		Hasher::hash_t hash = database.do_hash(key);
-		return database.do_lookup_no_rehash(key, hash);
+		return database.do_lookup(key, hash);
 	}
 
 	void expect(const K &key, int i)
