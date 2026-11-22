@@ -1112,6 +1112,8 @@ void AstNode::detectSignWidthWorker(int &width_hint, bool &sign_hint, bool *foun
 		break;
 
 	case AST_CAST_SIZE:
+		if (children.at(0)->type == AST_WIRE)
+			resolve_cast_type(true, 1, -1, false);
 		while (children.at(0)->simplify(true, 1, -1, false)) { }
 		if (children.at(0)->type != AST_CONSTANT)
 			input_error("Static cast with non constant expression!\n");

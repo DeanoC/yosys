@@ -1,0 +1,4 @@
+read_verilog -sv static_cast_case_and_fcall.sv
+prep -top top
+async2sync
+sat -verify -prove-asserts
