@@ -1388,11 +1388,15 @@ AST_INTERNAL::process_and_replace_module(RTLIL::Design *design,
                                          AST::AstNode *new_ast,
                                          std::unique_ptr<AstNode> original_ast)
 {
+	// Preserve old_module's current name in case it was renamed (e.g. by
+	// `hierarchy -chparam`) after its AST was derived.
+	std::string orig_name = old_module->name.str();
+
 	// The old module will be deleted. Rename and mark for deletion, using
 	// a static counter to make sure we get a unique name.
 	static unsigned counter;
 	std::ostringstream new_name;
-	new_name << old_module->name.str()
+	new_name << orig_name
 		 << "_before_process_and_replace_module_"
 		 << counter;
 	++counter;
@@ -1409,6 +1413,7 @@ AST_INTERNAL::process_and_replace_module(RTLIL::Design *design,
 	}
 
 	// Generate RTLIL from AST for the new module and add to the design:
+	new_ast->str = orig_name;
 	RTLIL::Module* new_module = process_module(design, new_ast, false, std::move(original_ast));
 
 	if (is_top)

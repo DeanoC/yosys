@@ -1,0 +1,30 @@
+# GitHub issue #71: hierarchy -chparam on a top module that triggers
+# AstModule::reprocess_if_necessary (signed wire slice or unbased unsized
+# literal on a parameterized child port) must replace the top module under
+# its current name instead of re-adding the stale $paramod name.
+
+read_verilog -sv <<EOT
+module sub #(parameter integer P = 0) (
+	input  wire signed [7:0] a,
+	output wire [7:0]        y
+);
+	assign y = a + 8'(P);
+endmodule
+
+module top #(parameter integer Q = 0) (
+	input  wire [15:0] b,
+	output wire [7:0]  y_slice,
+	output wire [7:0]  y_lit
+);
+	wire signed [15:0] s = b;
+	sub #(.P(Q)) u_slice (.a(s[7:0]), .y(y_slice));
+	sub #(.P(Q)) u_lit   (.a('0),     .y(y_lit));
+endmodule
+EOT
+
+hierarchy -check -top top -chparam Q 5
+flatten
+opt_expr
+opt_clean -purge
+select -assert-count 1 t:$add
+design -reset
