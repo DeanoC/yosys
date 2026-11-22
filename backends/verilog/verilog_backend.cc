@@ -1522,11 +1522,19 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
 		f << stringf("%s" "  input [%d:0] b;\n", indent, s_width*width-1);
 		f << stringf("%s" "  input [%d:0] s;\n", indent, s_width-1);
 
-		dump_attributes(f, indent + "  ", cell->attributes);
-		if (noparallelcase)
+		if (noparallelcase) {
+			dump_attributes(f, indent + "  ", cell->attributes);
 			f << stringf("%s" "  case (s)\n", indent);
-		else {
-			if (!noattr && (attr2comment || !cell->attributes.count(ID::parallel_case)))
+		} else {
+			bool has_true_parallel_case = !attr2comment && cell->get_bool_attribute(ID::parallel_case);
+			if (!noattr && !attr2comment && !has_true_parallel_case && cell->attributes.count(ID::parallel_case)) {
+				auto attrs = cell->attributes;
+				attrs.erase(ID::parallel_case);
+				dump_attributes(f, indent + "  ", attrs);
+			} else {
+				dump_attributes(f, indent + "  ", cell->attributes);
+			}
+			if (!noattr && !has_true_parallel_case)
 				f << stringf("%s" "  (* parallel_case *)\n", indent);
 			f << stringf("%s" "  casez (s)", indent);
 			f << (noattr ? " // synopsys parallel_case\n" : "\n");

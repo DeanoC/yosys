@@ -107,4 +107,40 @@ endmodule
 	EXPECT_EQ(count_occurrences(out, "parallel_case"), 1u) << out;
 }
 
+TEST(VerilogBackendTest, PmuxWithFalseParallelCaseAttributeEmitsTrueMarkerWithoutConflict)
+{
+	const std::string sv_false_attr = R"(
+module top (
+	input  logic [1:0] sel,
+	input  logic [7:0] a,
+	input  logic [7:0] b,
+	input  logic [7:0] c,
+	output logic [7:0] y
+);
+	always_comb begin
+		(* full_case, parallel_case = 0 *)
+		case (sel)
+			2'b00: y = a;
+			2'b01: y = b;
+			2'b10: y = c;
+			default: y = 8'h00;
+		endcase
+	end
+endmodule
+)";
+
+	std::string out = run_write_verilog(sv_false_attr);
+	size_t func_pos = out.find("function ");
+	ASSERT_NE(func_pos, std::string::npos) << out;
+	size_t endfunc_pos = out.find("endfunction", func_pos);
+	ASSERT_NE(endfunc_pos, std::string::npos) << out;
+	std::string func_body = out.substr(func_pos, endfunc_pos - func_pos);
+
+	ASSERT_NE(func_body.find("casez (s)"), std::string::npos) << func_body;
+	EXPECT_NE(func_body.find("(* full_case = 32'd1 *)"), std::string::npos) << func_body;
+	EXPECT_NE(func_body.find("(* parallel_case *)"), std::string::npos) << func_body;
+	EXPECT_EQ(func_body.find("parallel_case = 32'd0"), std::string::npos) << func_body;
+	EXPECT_EQ(count_occurrences(func_body, "parallel_case"), 1u) << func_body;
+}
+
 YOSYS_NAMESPACE_END
