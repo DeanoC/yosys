@@ -1,0 +1,4 @@
+read_verilog -sv concat_dynamic_lhs_nba.sv
+prep -top top
+async2sync
+sat -verify -prove-asserts

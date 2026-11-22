@@ -196,24 +196,31 @@ struct AST_INTERNAL::LookaheadRewriter
 {
 	dict<std::string, pair<AstNode*, AstNode*>> lookaheadids;
 
+	bool register_lookahead_wire(AstNode *node)
+	{
+		log_assert(node->type == AST_IDENTIFIER);
+		if (lookaheadids.count(node->str))
+			return false;
+		if (!node->id2ast || node->id2ast->type != AST_WIRE)
+			return false;
+		auto wire = std::make_unique<AstNode>(node->location, AST_WIRE);
+		for (auto& c : node->id2ast->children)
+			wire->children.push_back(c->clone());
+		wire->fixup_hierarchy_flags();
+		wire->str = stringf("$lookahead%s$%d", node->str, autoidx++);
+		wire->set_attribute(ID::nosync, AstNode::mkconst_int(node->location, 1, false));
+		wire->is_logic = true;
+		while (wire->simplify(true, 1, -1, false)) { }
+		lookaheadids[node->str] = make_pair(node->id2ast, wire.get());
+		wire->genRTLIL();
+		current_ast_mod->children.push_back(std::move(wire));
+		return true;
+	}
+
 	void collect_lookaheadids(AstNode *node)
 	{
-		if (node->lookahead) {
-			log_assert(node->type == AST_IDENTIFIER);
-			if (!lookaheadids.count(node->str)) {
-				auto wire = std::make_unique<AstNode>(node->location, AST_WIRE);
-				for (auto& c : node->id2ast->children)
-					wire->children.push_back(c->clone());
-				wire->fixup_hierarchy_flags();
-				wire->str = stringf("$lookahead%s$%d", node->str, autoidx++);
-				wire->set_attribute(ID::nosync, AstNode::mkconst_int(node->location, 1, false));
-				wire->is_logic = true;
-				while (wire->simplify(true, 1, -1, false)) { }
-				lookaheadids[node->str] = make_pair(node->id2ast, wire.get());
-				wire->genRTLIL();
-				current_ast_mod->children.push_back(std::move(wire));
-			}
-		}
+		if (node->lookahead)
+			register_lookahead_wire(node);
 
 		for (auto& child : node->children)
 			collect_lookaheadids(child.get());
@@ -221,8 +228,8 @@ struct AST_INTERNAL::LookaheadRewriter
 
 	bool has_lookaheadids(AstNode *node)
 	{
-		if (node->type == AST_IDENTIFIER && lookaheadids.count(node->str) != 0)
-			return true;
+		if (node->type == AST_IDENTIFIER)
+			return lookaheadids.count(node->str) != 0;
 
 		for (auto& child : node->children)
 			if (has_lookaheadids(child.get()))
@@ -233,14 +240,41 @@ struct AST_INTERNAL::LookaheadRewriter
 
 	bool has_nonlookaheadids(AstNode *node)
 	{
-		if (node->type == AST_IDENTIFIER && lookaheadids.count(node->str) == 0)
-			return true;
+		if (node->type == AST_IDENTIFIER)
+			return lookaheadids.count(node->str) == 0;
 
 		for (auto& child : node->children)
 			if (has_nonlookaheadids(child.get()))
 				return true;
 
 		return false;
+	}
+
+	bool promote_lhs_ids(AstNode *node)
+	{
+		if (node->type == AST_IDENTIFIER)
+			return register_lookahead_wire(node);
+
+		bool added = false;
+		for (auto& child : node->children)
+			if (promote_lhs_ids(child.get()))
+				added = true;
+		return added;
+	}
+
+	bool propagate_lookahead_lhs(AstNode *node)
+	{
+		bool added = false;
+		if (node->type == AST_ASSIGN_LE) {
+			if (has_lookaheadids(node->children[0].get()) && has_nonlookaheadids(node->children[0].get()))
+				if (promote_lhs_ids(node->children[0].get()))
+					added = true;
+			return added;
+		}
+		for (auto& child : node->children)
+			if (propagate_lookahead_lhs(child.get()))
+				added = true;
+		return added;
 	}
 
 	void rewrite_lookaheadids(AstNode *node, bool lhs = false)
@@ -287,6 +321,7 @@ struct AST_INTERNAL::LookaheadRewriter
 		log_assert(block != nullptr);
 
 		collect_lookaheadids(block);
+		while (propagate_lookahead_lhs(block)) { }
 		rewrite_lookaheadids(block);
 
 		for (auto it : lookaheadids)

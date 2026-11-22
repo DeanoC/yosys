@@ -3842,12 +3842,23 @@ skip_dynamic_range_lvalue_expansion:;
 	// assignment with nontrivial member in left-hand concat expression -> split assignment
 	if ((type == AST_ASSIGN_EQ || type == AST_ASSIGN_LE) && children[0]->type == AST_CONCAT && width_hint > 0)
 	{
-		bool found_nontrivial_member = false;
+		std::function<bool(AstNode*)> has_nontrivial_member = [&](AstNode *n) -> bool {
+			if (n->type == AST_IDENTIFIER && n->id2ast != nullptr) {
+				if (n->id2ast->type == AST_MEMORY)
+					return true;
+				if (n->id2ast->type == AST_WIRE && n->id2ast->range_valid &&
+						!n->children.empty() && n->children[0]->type == AST_RANGE && !n->children[0]->range_valid)
+					return true;
+			}
+			if (n->type == AST_CONCAT) {
+				for (auto &c : n->children)
+					if (has_nontrivial_member(c.get()))
+						return true;
+			}
+			return false;
+		};
 
-		for (auto& child : children[0]->children) {
-			if (child->type == AST_IDENTIFIER && child->id2ast != nullptr && child->id2ast->type == AST_MEMORY)
-				found_nontrivial_member = true;
-		}
+		bool found_nontrivial_member = has_nontrivial_member(children[0].get());
 
 		if (found_nontrivial_member)
 		{
