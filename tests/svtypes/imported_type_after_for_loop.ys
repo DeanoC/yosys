@@ -1,0 +1,4 @@
+read_verilog -sv imported_type_after_for_loop.sv
+prep -top top
+async2sync
+sat -verify -prove-asserts
