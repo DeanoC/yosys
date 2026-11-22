@@ -6,12 +6,17 @@ module top (
 	input  logic       rst,
 	input  logic [1:0] i,
 	input  logic [8:0] d,
+	input  logic       ext_bit,
 	output logic [7:0] q_repro,
 	output logic       h_repro,
 	output logic [7:0] q_alone,
 	output logic       h_alone,
 	output logic [7:0] q_mix,
 	output logic       h_mix,
+	output logic [7:0] q_part,
+	output logic [1:0] shared_vec,
+	output logic [7:0] q_part_ref,
+	output logic [1:0] shared_vec_ref,
 	output logic [7:0] q_ref,
 	output logic       h_ref
 );
@@ -56,6 +61,32 @@ module top (
 	end
 	assign q_mix = lo_mix[0];
 	assign h_mix = hi_mix;
+
+	// Case 4: part-selected non-lookahead target `shared_vec[0]` in mixed concat
+	// while a separate process drives `shared_vec[1]` (must not widen driver to all bits)
+	logic [3:0][7:0] lo_part;
+	always_ff @(posedge clk) begin
+		if (rst) lo_part[i] <= 8'd0;
+		else {lo_part[0], shared_vec[0]} <= d;
+	end
+	always_ff @(posedge clk) begin
+		shared_vec[1] <= ext_bit;
+	end
+	assign q_part = lo_part[0];
+
+	// Reference (split statements) for case 4
+	logic [3:0][7:0] lo_part_ref;
+	always_ff @(posedge clk) begin
+		if (rst) lo_part_ref[i] <= 8'd0;
+		else begin
+			lo_part_ref[0] <= d[8:1];
+			shared_vec_ref[0] <= d[0];
+		end
+	end
+	always_ff @(posedge clk) begin
+		shared_vec_ref[1] <= ext_bit;
+	end
+	assign q_part_ref = lo_part_ref[0];
 
 	// Combinational dynamic-concat equivalence check
 	logic [3:0][7:0] c_lo, c_lo_ref;

@@ -196,31 +196,24 @@ struct AST_INTERNAL::LookaheadRewriter
 {
 	dict<std::string, pair<AstNode*, AstNode*>> lookaheadids;
 
-	bool register_lookahead_wire(AstNode *node)
-	{
-		log_assert(node->type == AST_IDENTIFIER);
-		if (lookaheadids.count(node->str))
-			return false;
-		if (!node->id2ast || node->id2ast->type != AST_WIRE)
-			return false;
-		auto wire = std::make_unique<AstNode>(node->location, AST_WIRE);
-		for (auto& c : node->id2ast->children)
-			wire->children.push_back(c->clone());
-		wire->fixup_hierarchy_flags();
-		wire->str = stringf("$lookahead%s$%d", node->str, autoidx++);
-		wire->set_attribute(ID::nosync, AstNode::mkconst_int(node->location, 1, false));
-		wire->is_logic = true;
-		while (wire->simplify(true, 1, -1, false)) { }
-		lookaheadids[node->str] = make_pair(node->id2ast, wire.get());
-		wire->genRTLIL();
-		current_ast_mod->children.push_back(std::move(wire));
-		return true;
-	}
-
 	void collect_lookaheadids(AstNode *node)
 	{
-		if (node->lookahead)
-			register_lookahead_wire(node);
+		if (node->lookahead) {
+			log_assert(node->type == AST_IDENTIFIER);
+			if (!lookaheadids.count(node->str)) {
+				auto wire = std::make_unique<AstNode>(node->location, AST_WIRE);
+				for (auto& c : node->id2ast->children)
+					wire->children.push_back(c->clone());
+				wire->fixup_hierarchy_flags();
+				wire->str = stringf("$lookahead%s$%d", node->str, autoidx++);
+				wire->set_attribute(ID::nosync, AstNode::mkconst_int(node->location, 1, false));
+				wire->is_logic = true;
+				while (wire->simplify(true, 1, -1, false)) { }
+				lookaheadids[node->str] = make_pair(node->id2ast, wire.get());
+				wire->genRTLIL();
+				current_ast_mod->children.push_back(std::move(wire));
+			}
+		}
 
 		for (auto& child : node->children)
 			collect_lookaheadids(child.get());
@@ -250,31 +243,84 @@ struct AST_INTERNAL::LookaheadRewriter
 		return false;
 	}
 
-	bool promote_lhs_ids(AstNode *node)
+	bool split_mixed_concat_le(AstNode *node)
 	{
-		if (node->type == AST_IDENTIFIER)
-			return register_lookahead_wire(node);
+		if (node->children[0]->type != AST_CONCAT)
+			return false;
 
-		bool added = false;
-		for (auto& child : node->children)
-			if (promote_lhs_ids(child.get()))
-				added = true;
-		return added;
-	}
+		std::vector<AstNode*> members;
+		std::function<void(AstNode*)> collect_members = [&](AstNode *n) {
+			if (n->type == AST_CONCAT) {
+				for (auto &c : n->children)
+					collect_members(c.get());
+			} else {
+				members.push_back(n);
+			}
+		};
+		collect_members(node->children[0].get());
 
-	bool propagate_lookahead_lhs(AstNode *node)
-	{
-		bool added = false;
-		if (node->type == AST_ASSIGN_LE) {
-			if (has_lookaheadids(node->children[0].get()) && has_nonlookaheadids(node->children[0].get()))
-				if (promote_lhs_ids(node->children[0].get()))
-					added = true;
-			return added;
+		int total_width = 0;
+		std::vector<int> widths;
+		widths.reserve(members.size());
+		for (auto *m : members) {
+			int w = -1;
+			bool s = true;
+			m->detectSignWidth(w, s);
+			if (w <= 0)
+				return false;
+			widths.push_back(w);
+			total_width += w;
 		}
-		for (auto& child : node->children)
-			if (propagate_lookahead_lhs(child.get()))
-				added = true;
-		return added;
+		if (total_width <= 0)
+			return false;
+
+		auto loc = node->location;
+		auto wire_tmp_owned = std::make_unique<AstNode>(loc, AST_WIRE,
+			std::make_unique<AstNode>(loc, AST_RANGE,
+				AstNode::mkconst_int(loc, total_width - 1, true),
+				AstNode::mkconst_int(loc, 0, true)));
+		auto *wire_tmp = wire_tmp_owned.get();
+		wire_tmp->str = stringf("$lookahead_split$%d", autoidx++);
+		wire_tmp->set_attribute(ID::nosync, AstNode::mkconst_int(loc, 1, false));
+		wire_tmp->is_logic = true;
+		while (wire_tmp->simplify(true, 1, -1, false)) { }
+		wire_tmp->genRTLIL();
+		current_ast_mod->children.push_back(std::move(wire_tmp_owned));
+
+		auto wire_tmp_id = std::make_unique<AstNode>(loc, AST_IDENTIFIER);
+		wire_tmp_id->str = wire_tmp->str;
+		wire_tmp_id->id2ast = wire_tmp;
+		wire_tmp_id->was_checked = true;
+
+		auto orig_lhs = std::move(node->children[0]);
+		auto orig_rhs = std::move(node->children[1]);
+
+		node->type = AST_BLOCK;
+		node->children.clear();
+
+		auto assign_tmp = std::make_unique<AstNode>(loc, AST_ASSIGN_EQ, wire_tmp_id->clone(), std::move(orig_rhs));
+		assign_tmp->was_checked = true;
+		node->children.push_back(std::move(assign_tmp));
+
+		int cursor = 0;
+		for (size_t i = 0; i < members.size(); i++) {
+			auto rhs = wire_tmp_id->clone();
+			auto range = std::make_unique<AstNode>(loc, AST_RANGE,
+				AstNode::mkconst_int(loc, cursor + widths[i] - 1, true),
+				AstNode::mkconst_int(loc, cursor, true));
+			range->range_valid = true;
+			range->range_left = cursor + widths[i] - 1;
+			range->range_right = cursor;
+			rhs->children.push_back(std::move(range));
+
+			auto elem_assign = std::make_unique<AstNode>(loc, AST_ASSIGN_LE, members[i]->clone(), std::move(rhs));
+			elem_assign->was_checked = true;
+			node->children.push_back(std::move(elem_assign));
+
+			cursor += widths[i];
+		}
+
+		return true;
 	}
 
 	void rewrite_lookaheadids(AstNode *node, bool lhs = false)
@@ -283,8 +329,13 @@ struct AST_INTERNAL::LookaheadRewriter
 		{
 			if (has_lookaheadids(node->children[0].get()))
 			{
-				if (has_nonlookaheadids(node->children[0].get()))
+				if (has_nonlookaheadids(node->children[0].get())) {
+					if (split_mixed_concat_le(node)) {
+						rewrite_lookaheadids(node, lhs);
+						return;
+					}
 					log_error("incompatible mix of lookahead and non-lookahead IDs in LHS expression.\n");
+				}
 
 				rewrite_lookaheadids(node->children[0].get(), true);
 				node->type = AST_ASSIGN_EQ;
@@ -321,7 +372,6 @@ struct AST_INTERNAL::LookaheadRewriter
 		log_assert(block != nullptr);
 
 		collect_lookaheadids(block);
-		while (propagate_lookahead_lhs(block)) { }
 		rewrite_lookaheadids(block);
 
 		for (auto it : lookaheadids)
