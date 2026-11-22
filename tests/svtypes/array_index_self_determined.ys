@@ -1,0 +1,4 @@
+read_verilog -sv array_index_self_determined.sv
+prep -top top
+async2sync
+sat -verify -prove-asserts
