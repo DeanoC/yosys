@@ -151,6 +151,8 @@ module top (
 	spair_t               c_spair_signed_cast;
 	spair_t               c_spair_dollar_signed;
 	pair8_t [1:0]         c_pair_unsigned_cast;
+	logic [3:0][7:0]      c2d_2ps;
+	wrap_t                c_struct_2ps;
 
 	always_comb begin
 		row          = 12'h123;
@@ -248,6 +250,10 @@ module top (
 		c2d_ps_idx[1][2:1] = '{2: 1'b1, default: 1'b0};
 		c2d_outer_idx = 12'h000;
 		c2d_outer_idx[2:1] = '{2: 4'hA, default: 4'h7};
+		c2d_2ps = '0;
+		c2d_2ps[2:1][5:2] = '{default: 1'b1};
+		c_struct_2ps = '0;
+		c_struct_2ps.arr[2:1][2:1] = '{default: 1'b1};
 	end
 
 	always_comb assert(c2d == {4'd5, 4'd5, 4'd5});
@@ -324,4 +330,6 @@ module top (
 	always_comb assert(c2d_outer_ps == 12'h770);
 	always_comb assert(c2d_ps_idx == 12'h040);
 	always_comb assert(c2d_outer_idx == 12'hA70);
+	always_comb assert(c2d_2ps[1][5:2] == 4'h1);
+	always_comb assert(c_struct_2ps.arr[1][2:1] == 2'b01);
 endmodule

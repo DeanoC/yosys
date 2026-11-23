@@ -1660,6 +1660,50 @@ static std::vector<AstNode::dimension_t> slice_packed_dims(const std::vector<Ast
 	if (decl_dims.empty() || idx_dims < unpacked_dims)
 		return {};
 
+	auto slice_it = lhs->attributes.find(packed_slice_dims_attr());
+	if (slice_it != lhs->attributes.end() && slice_it->second->type == AST_MULTIRANGE && !slice_it->second->children.empty()) {
+		std::vector<AstNode::dimension_t> sdims;
+		int dyn_idx = -1;
+		int known_prod = 1;
+		bool ok = true;
+		for (int i = 0; i < GetSize(slice_it->second->children); i++) {
+			AstNode *r = slice_it->second->children[i].get();
+			if (r->type != AST_RANGE) {
+				ok = false;
+				break;
+			}
+			if (r->integer != 0) {
+				if (dyn_idx >= 0) {
+					ok = false;
+					break;
+				}
+				dyn_idx = i;
+				sdims.push_back({0, 1, false});
+			} else if (r->range_valid) {
+				int w = r->range_left - r->range_right + 1;
+				if (w <= 0) {
+					ok = false;
+					break;
+				}
+				known_prod *= w;
+				sdims.push_back({r->range_right, w, r->range_swapped});
+			} else {
+				ok = false;
+				break;
+			}
+		}
+		if (ok) {
+			if (dyn_idx >= 0) {
+				if (known_prod > 0 && lhs_width > 0 && lhs_width % known_prod == 0)
+					sdims[dyn_idx].range_width = lhs_width / known_prod;
+				else
+					ok = false;
+			}
+			if (ok)
+				return sdims;
+		}
+	}
+
 	auto part_range_dim = [&]() -> std::pair<bool, AstNode::dimension_t> {
 		auto it = lhs->attributes.find(packed_part_range_attr());
 		if (it != lhs->attributes.end() && it->second->type == AST_RANGE && it->second->range_valid) {
@@ -1852,11 +1896,12 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs, bool 
 			auto res = slice_packed_dims(member->dimensions, 0, (int)lhs->integer, lhs_width, lhs);
 			if (!res.empty()) {
 				int sub_len = signed_subarray_len_for_decl(member);
+				bool is_part_slice = lhs->attributes.count(packed_slice_dims_attr()) > 0;
 				if (out_signed)
-					*out_signed = (lhs->integer == 0) ? member->is_signed : (GetSize(res) == sub_len);
+					*out_signed = (lhs->integer == 0) ? member->is_signed : (!is_part_slice && GetSize(res) == sub_len);
 				if (out_signed_sub_len)
 					*out_signed_sub_len = sub_len;
-				if (out_elem_stype && GetSize(res) >= 2)
+				if (out_elem_stype && GetSize(res) >= 2 && (int)lhs->integer < GetSize(member->dimensions))
 					*out_elem_stype = struct_elem_type_for_decl(member);
 			}
 			return res;
@@ -1886,11 +1931,12 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs, bool 
 	auto res = slice_packed_dims(decl->dimensions, decl->unpacked_dimensions, idx_dims, lhs_width, lhs);
 	if (!res.empty()) {
 		int sub_len = signed_subarray_len_for_decl(decl);
+		bool is_part_slice = lhs->attributes.count(packed_slice_dims_attr()) > 0;
 		if (out_signed)
-			*out_signed = (idx_dims == 0 && lhs->children.empty()) ? decl->is_signed : (GetSize(res) == sub_len);
+			*out_signed = (idx_dims == 0 && lhs->children.empty()) ? decl->is_signed : (!is_part_slice && GetSize(res) == sub_len);
 		if (out_signed_sub_len)
 			*out_signed_sub_len = sub_len;
-		if (out_elem_stype && GetSize(res) >= 2)
+		if (out_elem_stype && GetSize(res) >= 2 && idx_dims < GetSize(decl->dimensions))
 			*out_elem_stype = struct_elem_type_for_decl(decl);
 	}
 	return res;
@@ -3913,10 +3959,12 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 					// save type and original number of dimensions for $size() etc.
 					newNode->set_attribute(ID::wiretype, item_node->clone());
 					if (!item_node->dimensions.empty() && children.size() > 0) {
+						int dims_sel = 0;
 						if (children[0]->type == AST_RANGE)
-							newNode->integer = 1;
+							dims_sel = 1;
 						else if (children[0]->type == AST_MULTIRANGE)
-							newNode->integer = children[0]->children.size();
+							dims_sel = children[0]->children.size();
+						newNode->integer = dims_sel;
 						AstNode *last_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.back().get() : children[0].get();
 						if (last_sel->type == AST_RANGE && last_sel->children.size() == 2 && last_sel->range_valid) {
 							int l = last_sel->range_swapped ? last_sel->range_right : last_sel->range_left;
@@ -3927,6 +3975,59 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 							rn->range_right = last_sel->range_right;
 							rn->range_swapped = last_sel->range_swapped;
 							newNode->set_attribute(packed_part_range_attr(), std::move(rn));
+						}
+						int total_member_dims = GetSize(item_node->dimensions);
+						if (dims_sel >= 1 && dims_sel <= total_member_dims) {
+							bool has_part_select = false;
+							for (int k = 0; k < dims_sel; k++) {
+								AstNode *sel = children[0]->type == AST_MULTIRANGE ? children[0]->children[k].get() : children[0].get();
+								if (sel->type == AST_RANGE && sel->children.size() == 2) {
+									has_part_select = true;
+									break;
+								}
+							}
+							if (has_part_select) {
+								auto slice_dims = std::make_unique<AstNode>(location, AST_MULTIRANGE);
+								for (int k = 0; k < dims_sel; k++) {
+									AstNode *sel = children[0]->type == AST_MULTIRANGE ? children[0]->children[k].get() : children[0].get();
+									if (sel->type == AST_RANGE && sel->children.size() == 2) {
+										if (sel->range_valid) {
+											int l = sel->range_swapped ? sel->range_right : sel->range_left;
+											int r = sel->range_swapped ? sel->range_left : sel->range_right;
+											auto rn = make_range(location, l, r);
+											rn->range_valid = true;
+											rn->range_left = sel->range_left;
+											rn->range_right = sel->range_right;
+											rn->range_swapped = sel->range_swapped;
+											slice_dims->children.push_back(std::move(rn));
+										} else {
+											int dyn_w = 1;
+											bool ok = try_determine_range_width(sel, dyn_w);
+											auto rn = make_range(location, ok ? (dyn_w - 1) : 0, 0);
+											rn->range_valid = true;
+											rn->range_left = ok ? (dyn_w - 1) : 0;
+											rn->range_right = 0;
+											rn->range_swapped = false;
+											rn->integer = ok ? 0 : 1;
+											slice_dims->children.push_back(std::move(rn));
+										}
+									}
+								}
+								for (int k = dims_sel; k < total_member_dims; k++) {
+									const auto &d = item_node->dimensions[k];
+									int low_b = d.range_right;
+									int high_b = low_b + d.range_width - 1;
+									int l = d.range_swapped ? low_b : high_b;
+									int r = d.range_swapped ? high_b : low_b;
+									auto rn = make_range(location, l, r);
+									rn->range_valid = true;
+									rn->range_left = high_b;
+									rn->range_right = low_b;
+									rn->range_swapped = d.range_swapped;
+									slice_dims->children.push_back(std::move(rn));
+								}
+								newNode->set_attribute(packed_slice_dims_attr(), std::move(slice_dims));
+							}
 						}
 					}
 					newNode->basic_prep = true;
