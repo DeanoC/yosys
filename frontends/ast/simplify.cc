@@ -268,6 +268,73 @@ static int add_dimension(AstNode *node, AstNode *rnode)
 	return width;
 }
 
+// True if the expression is built only from literals and operators. Simplifying
+// it cannot resolve any names, so the result does not depend on the scope it is
+// simplified from, and it cannot recurse back into the node that triggered it.
+static bool is_literal_only_expr(const AstNode *node)
+{
+	switch (node->type) {
+	case AST_CONSTANT:
+	case AST_REALVALUE:
+	case AST_RANGE:
+	case AST_MULTIRANGE:
+	case AST_CONCAT:
+	case AST_REPLICATE:
+	case AST_TO_SIGNED:
+	case AST_TO_UNSIGNED:
+	case AST_BIT_NOT:
+	case AST_BIT_AND:
+	case AST_BIT_OR:
+	case AST_BIT_XOR:
+	case AST_BIT_XNOR:
+	case AST_SHIFT_LEFT:
+	case AST_SHIFT_RIGHT:
+	case AST_SHIFT_SLEFT:
+	case AST_SHIFT_SRIGHT:
+	case AST_ADD:
+	case AST_SUB:
+	case AST_MUL:
+	case AST_DIV:
+	case AST_MOD:
+	case AST_POW:
+	case AST_POS:
+	case AST_NEG:
+		break;
+	default:
+		return false;
+	}
+	if (!node->attributes.empty())
+		return false;
+	for (auto &child : node->children)
+		if (!is_literal_only_expr(child.get()))
+			return false;
+	return true;
+}
+
+// A parameter/localparam with packed multidimensional type keeps its
+// AST_MULTIRANGE until its own declaration is simplified. It can be referenced
+// before that: by a forward reference, or when it is a $unit-scope declaration,
+// as those are appended after the module items. Simplify such a declaration on
+// demand when that is safe (it is built only from literals), so the reference
+// can be resolved right away, e.g. in a wire range. Returns true if the
+// declaration has been flattened; otherwise the caller must leave the reference
+// alone (without reporting progress) and retry on a later pass.
+static bool resolve_multirange_param_decl(AstNode *decl)
+{
+	if (decl->type != AST_PARAMETER && decl->type != AST_LOCALPARAM)
+		return false;
+	if (GetSize(decl->children) < 2 || decl->children[1]->type != AST_MULTIRANGE || decl->is_custom_type)
+		return false;
+	for (auto &child : decl->children)
+		if (!is_literal_only_expr(child.get()))
+			return false;
+	for (auto &attr : decl->attributes)
+		if (!is_literal_only_expr(attr.second.get()))
+			return false;
+	while (decl->simplify(true, 1, -1, false)) { }
+	return decl->children[1]->type != AST_MULTIRANGE;
+}
+
 // Rebuild the declared ranges of dimensions [begin_dim, end_dim) of a resolved
 // declaration, e.g. after its packed ranges were flattened into a single range.
 static std::unique_ptr<AstNode> dimensions_to_multirange(AstSrcLocType loc, const AstNode *node, int begin_dim, int end_dim)
@@ -1721,6 +1788,10 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 
 	std::unique_ptr<AstNode> newNode = nullptr;
 	bool did_something = false;
+	// Set when this node is waiting for a declaration to be resolved first. The
+	// node is then left unchanged (no progress reported) but must not be marked
+	// basic_prep, as it still needs to be processed once the declaration is ready.
+	bool waiting_on_decl = false;
 
 #if 0
 	log("-------------\n");
@@ -2350,6 +2421,16 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			if (!children[1]->range_valid)
 				input_error("Non-constant width range on parameter decl.\n");
 			width_hint = max(width_hint, children[1]->range_left - children[1]->range_right + 1);
+		} else if (children.size() > 1 && children[1]->type == AST_MULTIRANGE) {
+			while (!children[1]->basic_prep && children[1]->simplify(false, stage, -1, false) == true)
+				did_something = true;
+			int total_width = 1;
+			for (auto &range : children[1]->children) {
+				if (!range->range_valid)
+					input_error("Non-constant width range on parameter decl.\n");
+				total_width *= range->range_left - range->range_right + 1;
+			}
+			width_hint = max(width_hint, total_width);
 		}
 		break;
 	case AST_ENUM_ITEM:
@@ -2583,6 +2664,17 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			break;
 		if (type == AST_PREFIX && i >= 1)
 			break;
+		if (i == 0 && type == AST_FCALL && children[i]->type == AST_IDENTIFIER &&
+				(str == "\\$dimensions" || str == "\\$unpacked_dimensions" ||
+				 str == "\\$increment" || str == "\\$size" || str == "\\$bits" ||
+				 str == "\\$high" || str == "\\$low" || str == "\\$left" || str == "\\$right") &&
+				current_scope.count(children[i]->str)) {
+			AstNode *target = current_scope.at(children[i]->str);
+			if ((target->type == AST_PARAMETER || target->type == AST_LOCALPARAM) &&
+					(GetSize(target->dimensions) > 1 ||
+					 (target->children.size() > 1 && target->children[1]->type == AST_MULTIRANGE)))
+				continue;
+		}
 		if (type == AST_DEFPARAM && i == 0)
 			flag_autowire = true;
 		if (type == AST_TERNARY && i > 0 && !unevaluated_tern_branch) {
@@ -3013,8 +3105,40 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 		}
 	}
 
+	// Resolve packed ranges in parameter/localparam declarations.
+	if ((type == AST_PARAMETER || type == AST_LOCALPARAM) && dimensions.empty() && children.size() > 1) {
+		if (children[1]->type == AST_MULTIRANGE) {
+			bool all_valid = true;
+			for (auto &range : children[1]->children)
+				if (!range->range_valid)
+					all_valid = false;
+			if (all_valid) {
+				int width = 1;
+				for (auto &range : children[1]->children)
+					width *= add_dimension(this, range.get());
+				auto loc = children[1]->location;
+				auto flat_range = std::make_unique<AstNode>(loc, AST_RANGE, mkconst_int(loc, width - 1, true), mkconst_int(loc, 0, true));
+				flat_range->range_valid = true;
+				flat_range->range_left = width - 1;
+				flat_range->range_right = 0;
+				children[1] = std::move(flat_range);
+				fixup_hierarchy_flags();
+				did_something = true;
+			}
+		} else if (children[1]->type == AST_RANGE && children[1]->range_valid) {
+			add_dimension(this, children[1].get());
+		}
+	}
+
 	// Resolve multidimensional array access.
-	if (type == AST_IDENTIFIER && !basic_prep && id2ast && (id2ast->type == AST_WIRE || id2ast->type == AST_MEMORY) &&
+	// Parameters only take this path once their packed dimensions have been
+	// flattened and there is more than one of them. A select on a 1-D ranged
+	// parameter is never rewritten: it keeps its original range, so it is folded
+	// or handled by the array query functions just like before.
+	if (type == AST_IDENTIFIER && !basic_prep && id2ast &&
+		(id2ast->type == AST_WIRE || id2ast->type == AST_MEMORY ||
+		 ((id2ast->type == AST_PARAMETER || id2ast->type == AST_LOCALPARAM) && GetSize(id2ast->dimensions) > 1)) &&
+		!(id2ast->children.size() > 1 && id2ast->children[1]->type == AST_MULTIRANGE) &&
 		children.size() > 0 && (children[0]->type == AST_RANGE || children[0]->type == AST_MULTIRANGE))
 	{
 		int dims_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.size() : 1;
@@ -3077,6 +3201,79 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			}
 		}
 
+		// A non-final packed part-select on a parameter (e.g. T[2:1][0] or
+		// T[2:1][2:1]) selects non-contiguous elements that cannot be represented
+		// by a single flattened AST_RANGE from make_index_range(). Expand the
+		// first non-final packed part-select into an AST_CONCAT of per-element
+		// selects so both the value width and slice metadata are preserved.
+		if ((id2ast->type == AST_PARAMETER || id2ast->type == AST_LOCALPARAM) &&
+				children[0]->type == AST_MULTIRANGE && dims_sel <= total_decl_dims) {
+			int split_k = -1;
+			for (int k = id2ast->unpacked_dimensions; k < dims_sel - 1; k++) {
+				AstNode *sel = children[0]->children[k].get();
+				if (sel->type == AST_RANGE && sel->children.size() == 2) {
+					split_k = k;
+					break;
+				}
+			}
+			if (split_k >= 0) {
+				AstNode *sel = children[0]->children[split_k].get();
+				std::vector<std::unique_ptr<AstNode>> elem_indices;
+				if (sel->range_valid) {
+					int w = sel->range_left - sel->range_right + 1;
+					for (int i = 0; i < w; i++) {
+						int idx_val = sel->range_swapped ? (sel->range_left - i) : (sel->range_right + i);
+						elem_indices.push_back(mkconst_int(sel->location, idx_val, true));
+					}
+				} else {
+					auto left_z = sel->children[0]->clone_at_zero();
+					auto right_z = sel->children[1]->clone_at_zero();
+					while (left_z->simplify(true, 1, -1, false)) {}
+					while (right_z->simplify(true, 1, -1, false)) {}
+					if (left_z->type == AST_CONSTANT && right_z->type == AST_CONSTANT) {
+						int diff = int(left_z->integer) - int(right_z->integer);
+						int w = abs(diff) + 1;
+						bool ascending = id2ast->dimensions[split_k].range_swapped;
+						if (ascending) {
+							for (int i = 0; i < w; i++) {
+								if (i == 0)
+									elem_indices.push_back(sel->children[0]->clone());
+								else
+									elem_indices.push_back(std::make_unique<AstNode>(sel->location,
+											diff >= 0 ? AST_SUB : AST_ADD,
+											sel->children[0]->clone(), mkconst_int(sel->location, i, false)));
+							}
+						} else {
+							for (int i = 0; i < w; i++) {
+								if (i == 0)
+									elem_indices.push_back(sel->children[1]->clone());
+								else
+									elem_indices.push_back(std::make_unique<AstNode>(sel->location,
+											diff >= 0 ? AST_ADD : AST_SUB,
+											sel->children[1]->clone(), mkconst_int(sel->location, i, false)));
+							}
+						}
+					}
+				}
+				if (!elem_indices.empty()) {
+					auto concat = std::make_unique<AstNode>(location, AST_CONCAT);
+					auto slice_it = attributes.find(packed_slice_dims_attr());
+					if (slice_it != attributes.end())
+						concat->set_attribute(packed_slice_dims_attr(), slice_it->second->clone());
+					for (auto &idx_expr : elem_indices) {
+						auto elem = clone();
+						elem->attributes.erase(packed_slice_dims_attr());
+						elem->integer = 0;
+						auto idx_range = std::make_unique<AstNode>(sel->location, AST_RANGE, std::move(idx_expr));
+						elem->children[0]->children[split_k] = std::move(idx_range);
+						concat->children.push_back(std::move(elem));
+					}
+					newNode = std::move(concat);
+					goto apply_newNode;
+				}
+			}
+		}
+
 		// Split access into unpacked and packed parts.
 		std::unique_ptr<AstNode> unpacked_range = nullptr;
 		std::unique_ptr<AstNode> packed_range = nullptr;
@@ -3124,6 +3321,12 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			if (!children[1]->range_valid)
 				input_error("Non-constant width range on parameter decl.\n");
 			int width = std::abs(children[1]->range_left - children[1]->range_right) + 1;
+			// The declared range governs the shape of the value. Drop the slice
+			// dimensions a part-select initializer carries (e.g. T[2:1][2:1] folds to
+			// a constant that keeps them): references clone the value, so array
+			// queries on this parameter, or on copies of it, would otherwise report
+			// the dimensions of the initializer instead of the declared ones.
+			children[0]->attributes.erase(packed_slice_dims_attr());
 			if (children[0]->type == AST_REALVALUE) {
 				RTLIL::Const constvalue = children[0]->realAsConst(width);
 				log_file_warning(location.to_loc(), "converting real value %e to binary %s.\n",
@@ -4925,6 +5128,45 @@ skip_dynamic_range_lvalue_expansion:;
 					width = high - low + 1;
 				};
 
+				auto eval_from_slice_dims = [&](AstNode *target, AstNode *slice_node, int fallback_arg_width) {
+					auto &sdims = slice_node->children;
+					int total_dims = GetSize(sdims);
+					if (req_dim < 1 || req_dim > total_dims)
+						input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n",
+								req_dim, target->str.empty() ? "expression" : target->str, total_dims);
+					std::vector<int> dim_widths(total_dims, 1);
+					int dyn_idx = -1;
+					int known_prod = 1;
+					for (int i = 0; i < total_dims; i++) {
+						auto *r = sdims[i].get();
+						if (r->integer != 0) {
+							dyn_idx = i;
+						} else {
+							while (!r->range_valid && r->simplify(true, stage, -1, false)) { }
+							dim_widths[i] = r->range_left - r->range_right + 1;
+							known_prod *= dim_widths[i];
+						}
+					}
+					if (dyn_idx >= 0 && fallback_arg_width > 0 && known_prod > 0)
+						dim_widths[dyn_idx] = fallback_arg_width / known_prod;
+					expr_dimensions = total_dims - req_dim + 1;
+					expr_unpacked_dimensions = 0;
+					width = dim_widths[req_dim - 1];
+					mem_depth = 1;
+					for (int i = req_dim; i < total_dims; i++)
+						mem_depth *= dim_widths[i];
+					auto *qr = sdims[req_dim - 1].get();
+					if (qr->integer != 0) {
+						right = low = 0;
+						left = high = width - 1;
+					} else {
+						right = low = qr->range_right;
+						left = high = qr->range_left;
+						if (qr->range_swapped)
+							std::swap(left, right);
+					}
+				};
+
 				if (buf->type == AST_WIRE || buf->type == AST_MEMORY || buf->type == AST_STRUCT || buf->type == AST_UNION) {
 					while (buf->simplify(true, stage, -1, false)) { }
 					if (buf->type == AST_STRUCT || buf->type == AST_UNION) {
@@ -4950,7 +5192,14 @@ skip_dynamic_range_lvalue_expansion:;
 				} else {
 					int arg_width = -1;
 					bool arg_sign = true;
-					buf->detectSignWidth(arg_width, arg_sign);
+					bool skip_detect = false;
+					if (buf->type == AST_IDENTIFIER && !buf->basic_prep) {
+						AstNode *target = buf->id2ast ? buf->id2ast : (current_scope.count(buf->str) ? current_scope.at(buf->str) : nullptr);
+						if (target && (target->type == AST_PARAMETER || target->type == AST_LOCALPARAM))
+							skip_detect = true;
+					}
+					if (!skip_detect)
+						buf->detectSignWidth(arg_width, arg_sign);
 
 					if (buf->type == AST_IDENTIFIER) {
 						id_ast = buf->id2ast;
@@ -4967,6 +5216,101 @@ skip_dynamic_range_lvalue_expansion:;
 							left = high = width - 1;
 							right = low = 0;
 							expr_dimensions = 1;
+						} else if ((id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) &&
+								id_ast->children.size() > 1 && id_ast->children[1]->type == AST_MULTIRANGE) {
+							// The parameter's packed dimensions are not flattened yet. Resolve
+							// the declaration if that is safe; otherwise retry on a later pass.
+							// Only report progress if something changed: callers loop on
+							// simplify() until it returns false.
+							if (resolve_multirange_param_decl(id_ast))
+								did_something = true;
+							else
+								waiting_on_decl = true;
+							goto replace_fcall_later;
+						} else if ((id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) && !id_ast->dimensions.empty()) {
+							// Check for item in packed struct / union
+							AstNode *item_node = buf->get_struct_member();
+							bool from_struct_array_member = false;
+							if (!item_node && buf->attributes.count(struct_array_member_attr())) {
+								item_node = buf->attributes.at(struct_array_member_attr()).get();
+								from_struct_array_member = true;
+							}
+							if (item_node)
+								id_ast = item_node;
+
+							int dims = GetSize(id_ast->dimensions);
+							auto slice_it = !from_struct_array_member ? buf->attributes.find(packed_slice_dims_attr()) : buf->attributes.end();
+							if (slice_it != buf->attributes.end() && slice_it->second->type == AST_MULTIRANGE && !slice_it->second->children.empty()) {
+								eval_from_slice_dims(id_ast, slice_it->second.get(), arg_width);
+							} else {
+								// The selects on a parameter reference are still the original ones
+								// unless the multidimensional access block rewrote them, which also
+								// sets basic_prep. That block skips 1-D parameters, whose references
+								// only become basic_prep by being fully simplified (e.g. P[a]).
+								bool is_param_query = (id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) &&
+										(!buf->basic_prep || dims == 1);
+								std::vector<AstNode*> param_sels;
+								if (is_param_query && !buf->children.empty()) {
+									if (buf->children[0]->type == AST_MULTIRANGE) {
+										for (auto &c : buf->children[0]->children)
+											param_sels.push_back(c.get());
+									} else if (buf->children[0]->type == AST_RANGE) {
+										param_sels.push_back(buf->children[0].get());
+									}
+								}
+								int param_idx_dims = GetSize(param_sels);
+								bool has_part_select = false;
+								if (is_param_query && param_idx_dims >= 1 && param_idx_dims <= dims) {
+									for (AstNode *sel : param_sels) {
+										if (sel->type == AST_RANGE && sel->children.size() == 2) {
+											has_part_select = true;
+											break;
+										}
+									}
+								}
+
+								int eff_idx_dims = from_struct_array_member ? 0 : (is_param_query ? param_idx_dims : (int)buf->integer);
+								if (has_part_select) {
+									std::vector<AstNode::dimension_t> preserved;
+									for (AstNode *sel : param_sels) {
+										if (sel->type == AST_RANGE && sel->children.size() == 2) {
+											while (sel->simplify(true, stage, -1, false)) { }
+											if (sel->range_valid) {
+												preserved.push_back({sel->range_right, sel->range_left - sel->range_right + 1, sel->range_swapped});
+											} else {
+												int sel_width = 1;
+												if (!try_determine_range_width(sel, sel_width))
+													input_error("Unsupported expression on dynamic range select on parameter `%s'!\n", id_ast->str);
+												preserved.push_back({0, sel_width, false});
+											}
+										}
+									}
+									for (int i = param_idx_dims; i < dims; i++)
+										preserved.push_back(id_ast->dimensions[i]);
+									int total_dims = GetSize(preserved);
+									if (req_dim < 1 || req_dim > total_dims)
+										input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", req_dim, id_ast->str, total_dims);
+									expr_dimensions = total_dims - req_dim + 1;
+									expr_unpacked_dimensions = 0;
+									right = low = preserved[req_dim - 1].range_right;
+									left = high = low + preserved[req_dim - 1].range_width - 1;
+									if (preserved[req_dim - 1].range_swapped)
+										std::swap(left, right);
+									for (int i = req_dim; i < total_dims; i++)
+										mem_depth *= preserved[i].range_width;
+									width = high - low + 1;
+								} else if (eff_idx_dims == dims) {
+									if (req_dim != 1)
+										input_error("Dimension %d out of range in `%s', as it only has 1 dimensions!\n", req_dim, id_ast->str);
+									right = low = 0;
+									left = high = 0;
+									expr_dimensions = 1;
+									expr_unpacked_dimensions = 0;
+									width = 1;
+								} else {
+									eval_from_dimensions(id_ast, req_dim + eff_idx_dims);
+								}
+							}
 						} else if (id_ast->type == AST_WIRE || id_ast->type == AST_MEMORY) {
 							// Check for item in packed struct / union
 							AstNode *item_node = buf->get_struct_member();
@@ -4985,41 +5329,7 @@ skip_dynamic_range_lvalue_expansion:;
 							int dims = GetSize(id_ast->dimensions);
 							auto slice_it = !from_struct_array_member ? buf->attributes.find(packed_slice_dims_attr()) : buf->attributes.end();
 							if (slice_it != buf->attributes.end() && slice_it->second->type == AST_MULTIRANGE && !slice_it->second->children.empty()) {
-								auto &sdims = slice_it->second->children;
-								int total_dims = GetSize(sdims);
-								if (req_dim < 1 || req_dim > total_dims)
-									input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", req_dim, id_ast->str, total_dims);
-								std::vector<int> dim_widths(total_dims, 1);
-								int dyn_idx = -1;
-								int known_prod = 1;
-								for (int i = 0; i < total_dims; i++) {
-									auto *r = sdims[i].get();
-									if (r->integer != 0) {
-										dyn_idx = i;
-									} else {
-										while (!r->range_valid && r->simplify(true, stage, -1, false)) { }
-										dim_widths[i] = r->range_left - r->range_right + 1;
-										known_prod *= dim_widths[i];
-									}
-								}
-								if (dyn_idx >= 0 && arg_width > 0 && known_prod > 0)
-									dim_widths[dyn_idx] = arg_width / known_prod;
-								expr_dimensions = total_dims - req_dim + 1;
-								expr_unpacked_dimensions = 0;
-								width = dim_widths[req_dim - 1];
-								mem_depth = 1;
-								for (int i = req_dim; i < total_dims; i++)
-									mem_depth *= dim_widths[i];
-								auto *qr = sdims[req_dim - 1].get();
-								if (qr->integer != 0) {
-									right = low = 0;
-									left = high = width - 1;
-								} else {
-									right = low = qr->range_right;
-									left = high = qr->range_left;
-									if (qr->range_swapped)
-										std::swap(left, right);
-								}
+								eval_from_slice_dims(id_ast, slice_it->second.get(), arg_width);
 							} else if (str == "\\$bits" && !buf->children.empty() && idx_dims >= id_ast->unpacked_dimensions && arg_width > 0) {
 								// Any packed bit-select, part-select, or fully-unpacked-indexed
 								// slice has bit width given directly by detectSignWidth().
@@ -5040,16 +5350,23 @@ skip_dynamic_range_lvalue_expansion:;
 								eval_from_dimensions(id_ast, req_dim + idx_dims);
 							}
 						} else {
+							if (skip_detect)
+								buf->detectSignWidth(arg_width, arg_sign);
 							width = arg_width;
 							right = low = 0;
 							left = high = width - 1;
 							expr_dimensions = 1;
 						}
 					} else {
-						width = arg_width;
-						right = low  = 0;
-						left  = high = width - 1;
-						expr_dimensions = 1;
+						auto slice_it = buf->attributes.find(packed_slice_dims_attr());
+						if (slice_it != buf->attributes.end() && slice_it->second->type == AST_MULTIRANGE && !slice_it->second->children.empty()) {
+							eval_from_slice_dims(buf.get(), slice_it->second.get(), arg_width);
+						} else {
+							width = arg_width;
+							right = low  = 0;
+							left  = high = width - 1;
+							expr_dimensions = 1;
+						}
 					}
 				}
 				if (str == "\\$dimensions")
@@ -5602,8 +5919,24 @@ replace_fcall_later:;
 		{
 		case AST_IDENTIFIER:
 			if (current_scope.count(str) > 0 && (current_scope[str]->type == AST_PARAMETER || current_scope[str]->type == AST_LOCALPARAM || current_scope[str]->type == AST_ENUM_ITEM)) {
-				if (current_scope[str]->children[0]->type == AST_CONSTANT) {
+				if (current_scope[str]->children.size() > 1 && current_scope[str]->children[1]->type == AST_MULTIRANGE) {
+					// The declaration's packed dimensions are not flattened yet, so
+					// folding now would use the wrong layout. Resolve the declaration
+					// if that is safe; otherwise leave the reference for a later pass.
+					// Only report progress if something changed: callers loop on
+					// simplify() until it returns false. The multidimensional access
+					// still has to be resolved, so don't let this become basic_prep.
+					if (resolve_multirange_param_decl(current_scope[str]))
+						did_something = true;
+					else
+						waiting_on_decl = true;
+					break;
+				} else if (current_scope[str]->children[0]->type == AST_CONSTANT) {
 					if (children.size() != 0 && children[0]->type == AST_RANGE && children[0]->range_valid) {
+						if (!basic_prep && GetSize(current_scope[str]->dimensions) > 1) {
+							did_something = true;
+							break;
+						}
 						std::vector<RTLIL::State> data;
 						bool param_upto = current_scope[str]->range_valid && current_scope[str]->range_swapped;
 						int param_offset = current_scope[str]->range_valid ? current_scope[str]->range_right : 0;
@@ -5839,6 +6172,8 @@ replace_fcall_later:;
 				tmp_bits.insert(tmp_bits.end(), (*it)->bits.begin(), (*it)->bits.end());
 			}
 			newNode = string_op ? mkconst_str(location, tmp_bits) : mkconst_bits(location, tmp_bits, false);
+			if (auto slice_it = attributes.find(packed_slice_dims_attr()); slice_it != attributes.end())
+				newNode->set_attribute(packed_slice_dims_attr(), slice_it->second->clone());
 			break;
 		case AST_REPLICATE:
 			if (children.at(0)->type != AST_CONSTANT || children.at(1)->type != AST_CONSTANT)
@@ -5881,7 +6216,7 @@ apply_newNode:
 		did_something = true;
 	}
 
-	if (!did_something)
+	if (!did_something && !waiting_on_decl)
 		basic_prep = true;
 
 	recursion_counter--;

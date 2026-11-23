@@ -2131,9 +2131,9 @@ param_real:
 	};
 
 param_range:
-	range {
+	range_or_multirange {
 		if ($1 != nullptr) {
-			extra->astbuf1->children.push_back(std::move($1));
+			extra->astbuf1->children.push_back(checkRange(extra->astbuf1.get(), std::move($1)));
 		}
 	};
 
@@ -2143,7 +2143,10 @@ param_range_type:
 		addRange(extra->astbuf1.get(), 0, 0);
 	} |
 	type_vec param_signed non_opt_range {
-		extra->astbuf1->children.push_back(std::move($3));
+		extra->astbuf1->children.push_back(checkRange(extra->astbuf1.get(), std::move($3)));
+	} |
+	type_vec param_signed non_opt_multirange {
+		extra->astbuf1->children.push_back(checkRange(extra->astbuf1.get(), std::move($3)));
 	};
 param_implicit_type: param_signed param_range;
 
