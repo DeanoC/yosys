@@ -1,0 +1,5 @@
+read_verilog -sv packed_array_default_pattern.sv
+prep -top top
+check -assert
+chformal -lower
+sat -seq 4 -set-init-undef -verify -prove-asserts -prove o_repro o_repro_ref

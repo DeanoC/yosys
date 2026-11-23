@@ -1461,6 +1461,186 @@ static std::unique_ptr<AstNode> cast_to_width(AstSrcLocType loc, int width, std:
 	return std::make_unique<AstNode>(loc, AST_CAST_SIZE, AstNode::mkconst_int(loc, width, false), std::move(value));
 }
 
+static bool assignment_pattern_has_index_key(AstNode *pattern)
+{
+	if (pattern->type != AST_ASSIGN_PATTERN)
+		return false;
+	for (auto &child : pattern->children) {
+		if (child->attributes.count(pattern_index_attr()))
+			return true;
+	}
+	return false;
+}
+
+static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs)
+{
+	if (lhs->type != AST_IDENTIFIER || lhs->id2ast == nullptr)
+		return {};
+
+	int lhs_width = -1;
+	bool lhs_sign = true;
+	lhs->detectSignWidth(lhs_width, lhs_sign);
+	if (lhs_width <= 0)
+		return {};
+
+	if (AstNode *member = lhs->get_struct_member()) {
+		if (member->type == AST_STRUCT_ITEM && !member->dimensions.empty() && lhs_width == packed_member_width(member))
+			return member->dimensions;
+		return {};
+	}
+
+	AstNode *decl = lhs->id2ast;
+	if (decl->type != AST_WIRE && decl->type != AST_MEMORY)
+		return {};
+	if (decl->dimensions.empty())
+		return {};
+
+	int start_dim = -1;
+	if (lhs->children.empty()) {
+		if (decl->unpacked_dimensions != 0)
+			return {};
+		start_dim = 0;
+	} else if (lhs->basic_prep && lhs->integer > 0) {
+		int idx_dims = (int)lhs->integer;
+		if (idx_dims >= decl->unpacked_dimensions && idx_dims < GetSize(decl->dimensions))
+			start_dim = idx_dims;
+	}
+
+	if (start_dim < 0)
+		return {};
+
+	std::vector<AstNode::dimension_t> dims(decl->dimensions.begin() + start_dim, decl->dimensions.end());
+	int total = 1;
+	for (const auto &d : dims)
+		total *= d.range_width;
+	if (total != lhs_width)
+		return {};
+	return dims;
+}
+
+static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern, const std::vector<AstNode::dimension_t> &dims, int dim_idx)
+{
+	log_assert(pattern->type == AST_ASSIGN_PATTERN);
+	log_assert(dim_idx >= 0 && dim_idx < GetSize(dims));
+
+	auto strip_pattern_attrs = [](AstNode *elem) {
+		auto val = elem->clone();
+		val->attributes.erase(pattern_member_attr());
+		val->attributes.erase(pattern_default_attr());
+		val->attributes.erase(pattern_index_attr());
+		return val;
+	};
+
+	const auto &dim = dims[dim_idx];
+	int count = dim.range_width;
+	int rem_dims = GetSize(dims) - dim_idx;
+	int elem_width = 1;
+	for (int d = dim_idx + 1; d < GetSize(dims); d++)
+		elem_width *= dims[d].range_width;
+
+	auto loc = pattern->location;
+
+	auto elaborate_elem = [&](AstNode *elem) -> std::unique_ptr<AstNode> {
+		auto val = strip_pattern_attrs(elem);
+		if (val->type == AST_ASSIGN_PATTERN) {
+			if (dim_idx + 1 >= GetSize(dims))
+				elem->input_error("Nested assignment pattern exceeds packed array dimensions\n");
+			return elaborate_packed_array_pattern(val.get(), dims, dim_idx + 1);
+		}
+		return cast_to_width(loc, elem_width, std::move(val));
+	};
+
+	AstNode *default_elem = nullptr;
+	bool has_index = false;
+	bool has_positional = false;
+	for (auto &child : pattern->children) {
+		if (child->attributes.count(pattern_default_attr())) {
+			if (default_elem)
+				child->input_error("Assignment pattern has multiple defaults\n");
+			default_elem = child.get();
+		} else if (child->attributes.count(pattern_index_attr())) {
+			has_index = true;
+		} else if (child->attributes.count(pattern_member_attr())) {
+			child->input_error("Named assignment pattern target is not a packed struct or union\n");
+		} else {
+			has_positional = true;
+		}
+	}
+
+	if (has_positional && (has_index || default_elem))
+		pattern->input_error("Assignment pattern mixes positional and keyed elements\n");
+
+	// Default-only pattern: '{default: val}
+	if (default_elem && !has_index) {
+		auto val = strip_pattern_attrs(default_elem);
+		if (val->type == AST_ASSIGN_PATTERN) {
+			if (dim_idx + 1 >= GetSize(dims))
+				default_elem->input_error("Nested assignment pattern exceeds packed array dimensions\n");
+			auto sub = elaborate_packed_array_pattern(val.get(), dims, dim_idx + 1);
+			return std::make_unique<AstNode>(loc, AST_REPLICATE, AstNode::mkconst_int(loc, count, false), std::move(sub));
+		}
+		int leaf_width = (rem_dims >= 2) ? dims.back().range_width : 1;
+		int leaf_count = (rem_dims >= 2) ? 1 : count;
+		if (rem_dims >= 2) {
+			for (int d = dim_idx; d < GetSize(dims) - 1; d++)
+				leaf_count *= dims[d].range_width;
+		}
+		return std::make_unique<AstNode>(loc, AST_REPLICATE,
+				AstNode::mkconst_int(loc, leaf_count, false),
+				cast_to_width(loc, leaf_width, std::move(val)));
+	}
+
+	// Indexed pattern: '{0: a, 2: b, default: c}
+	if (has_index) {
+		std::vector<AstNode*> slots(count, nullptr);
+		for (auto &child : pattern->children) {
+			if (child->attributes.count(pattern_default_attr()))
+				continue;
+			auto key_it = child->attributes.find(pattern_index_attr());
+			log_assert(key_it != child->attributes.end() && key_it->second);
+			auto key = key_it->second->clone();
+			while (key->simplify(true, 1, -1, false)) { }
+			if (key->type != AST_CONSTANT) {
+				if (child->attributes.count(pattern_member_attr()))
+					child->input_error("Named assignment pattern target is not a packed struct or union\n");
+				child->input_error("Indexed assignment pattern key must be a constant expression\n");
+			}
+			auto index = key->bitsAsConst().try_as_int(key->is_signed);
+			if (!index)
+				child->input_error("Indexed assignment pattern key does not fit in a 32-bit array index\n");
+			int64_t rel = (int64_t)*index - (int64_t)dim.range_right;
+			if (rel < 0 || rel >= count)
+				child->input_error("Indexed assignment pattern key %d is outside the array range\n", *index);
+			int slot = dim.range_swapped ? (count - 1 - (int)rel) : (int)rel;
+			if (slots[slot] != nullptr)
+				child->input_error("Duplicate index %d in indexed assignment pattern\n", *index);
+			slots[slot] = child.get();
+		}
+		auto concat = std::make_unique<AstNode>(loc, AST_CONCAT);
+		for (int s = 0; s < count; s++) {
+			AstNode *elem = slots[s] ? slots[s] : default_elem;
+			if (!elem)
+				pattern->input_error("Indexed assignment pattern does not specify every array element\n");
+			if (!slots[s] && default_elem && default_elem->type != AST_ASSIGN_PATTERN && rem_dims >= 3) {
+				auto sub_pat = std::make_unique<AstNode>(loc, AST_ASSIGN_PATTERN, default_elem->clone());
+				concat->children.push_back(elaborate_packed_array_pattern(sub_pat.get(), dims, dim_idx + 1));
+			} else {
+				concat->children.push_back(elaborate_elem(elem));
+			}
+		}
+		return concat;
+	}
+
+	// Positional pattern (reached only when nested inside a keyed/default packed-array pattern)
+	if (GetSize(pattern->children) != count)
+		pattern->input_error("Positional assignment pattern element count mismatch: got %d, expected %d\n",
+				GetSize(pattern->children), count);
+	auto concat = std::make_unique<AstNode>(loc, AST_CONCAT);
+	for (int i = count - 1; i >= 0; i--)
+		concat->children.push_back(elaborate_elem(pattern->children[i].get()));
+	return concat;
+}
+
 static std::unique_ptr<AstNode> elaborate_named_pattern(AstNode *pattern, const std::vector<AstNode*> &members);
 static std::unique_ptr<AstNode> elaborate_positional_pattern(AstNode *pattern, const std::vector<AstNode*> &members);
 
@@ -1471,6 +1651,10 @@ static std::unique_ptr<AstNode> pattern_element_value(AstNode *elem, AstNode *me
 	value->attributes.erase(pattern_default_attr());
 	value->attributes.erase(pattern_index_attr());
 	if (value->type == AST_ASSIGN_PATTERN) {
+		if (member->type == AST_STRUCT_ITEM && !member->dimensions.empty() &&
+				(assignment_pattern_is_named(value.get()) || assignment_pattern_has_index_key(value.get()))) {
+			return elaborate_packed_array_pattern(value.get(), member->dimensions, 0);
+		}
 		if (member->type != AST_STRUCT && member->type != AST_UNION)
 			elem->input_error("Assignment pattern member '%s' is not a struct or union\n", member->str);
 		std::vector<AstNode*> sub;
@@ -1648,6 +1832,12 @@ bool AstNode::resolve_cast_type(bool const_fold, int stage, int width_hint, bool
 		case AST_WIRE: {
 			if (template_node->children.size() > 0 && template_node->children[0]->type == AST_RANGE)
 				width = range_width(this, template_node->children[0].get());
+			if (GetSize(children) > 1 && children[1]->type == AST_ASSIGN_PATTERN &&
+					!template_node->dimensions.empty() && template_node->unpacked_dimensions == 0 &&
+					(assignment_pattern_is_named(children[1].get()) || assignment_pattern_has_index_key(children[1].get()))) {
+				children[1] = elaborate_packed_array_pattern(children[1].get(), template_node->dimensions, 0);
+				fixup_hierarchy_flags();
+			}
 			child->delete_children();
 			node = mkconst_int(child->location, width, true);
 			break;
@@ -4016,21 +4206,37 @@ skip_dynamic_range_lvalue_expansion:;
 		}
 	}
 
-	// Named assignment pattern: '{member: expr, default: expr} -> concatenation in
-	// struct member order (LSB first). Positional patterns and array defaults stay on the
+	// Named/keyed assignment pattern: '{member: expr, default: expr} on packed
+	// structs/unions, or '{default: expr} / '{idx: expr, default: expr} on packed
+	// arrays/vectors. Positional patterns and unpacked-array patterns stay on the
 	// unpacked-array path.
 	if ((type == AST_ASSIGN_EQ || type == AST_ASSIGN_LE || type == AST_ASSIGN) &&
 			GetSize(children) >= 2 && children[1]->type == AST_ASSIGN_PATTERN &&
-			assignment_pattern_is_named(children[1].get()) && !is_unexpanded_array_ref(children[0].get()))
+			(assignment_pattern_is_named(children[1].get()) || assignment_pattern_has_index_key(children[1].get())) &&
+			!is_unexpanded_array_ref(children[0].get()))
 	{
-		if (!is_whole_struct_pattern_target(children[0].get()))
-			input_error("Named assignment pattern requires a whole struct or union target.\n");
-		auto members = members_for_lhs(children[0].get());
-		if (members.empty())
-			children[0]->input_error("Named assignment pattern target `%s' is not a packed struct or union\n", children[0]->str);
-		children[1] = elaborate_named_pattern(children[1].get(), members);
-		fixup_hierarchy_flags();
-		did_something = true;
+		auto members = is_whole_struct_pattern_target(children[0].get()) ? members_for_lhs(children[0].get()) : std::vector<AstNode*>{};
+		if (!members.empty()) {
+			children[1] = elaborate_named_pattern(children[1].get(), members);
+			fixup_hierarchy_flags();
+			did_something = true;
+		} else {
+			auto dims = packed_dims_for_lhs(children[0].get());
+			if (!dims.empty()) {
+				children[1] = elaborate_packed_array_pattern(children[1].get(), dims, 0);
+				fixup_hierarchy_flags();
+				did_something = true;
+			} else if (children[0]->type == AST_IDENTIFIER && children[0]->id2ast &&
+					(children[0]->id2ast->type == AST_WIRE || children[0]->id2ast->type == AST_MEMORY) &&
+					children[0]->id2ast->dimensions.empty()) {
+				// Target declaration has not been simplified yet; retry next pass.
+				did_something = true;
+			} else if (!is_whole_struct_pattern_target(children[0].get())) {
+				input_error("Named assignment pattern requires a whole struct, union, or packed array target.\n");
+			} else {
+				children[0]->input_error("Named assignment pattern target `%s' is not a packed struct or union\n", children[0]->str);
+			}
+		}
 	}
 
 	// Expand array assignment: arr_out = arr_in OR arr_out = cond ? arr_a : arr_b OR arr_out = '{a, b}
