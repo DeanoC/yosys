@@ -1611,6 +1611,71 @@ static std::unique_ptr<AstNode> elaborate_named_pattern(AstNode *pattern, const 
 //
 // this function also does all name resolving and sets the id2ast member of all
 // nodes that link to a different node using names and lexical scoping.
+bool AstNode::resolve_cast_type(bool const_fold, int stage, int width_hint, bool sign_hint)
+{
+	if (type != AST_CAST_SIZE || children.empty() || children[0]->type != AST_WIRE)
+		return false;
+
+	int width = 1;
+	std::unique_ptr<AstNode> node;
+	auto* child = children[0].get();
+	if (child->children.size() == 0) {
+		// Base type (e.g., int)
+		width = child->range_left - child->range_right + 1;
+		node = mkconst_int(child->location, width, child->is_signed);
+	} else {
+		// User defined type
+		log_assert(child->children[0]->type == AST_WIRETYPE);
+
+		const std::string &type_name = child->children[0]->str;
+		if (!current_scope.count(type_name))
+			input_error("Unknown identifier `%s' used as type name\n", type_name);
+		AstNode *resolved_type_node = current_scope.at(type_name);
+		if (resolved_type_node->type != AST_TYPEDEF)
+			input_error("`%s' does not name a type\n", type_name);
+		log_assert(resolved_type_node->children.size() == 1);
+		auto* template_node = resolved_type_node->children[0].get();
+
+		// Ensure typedef itself is fully simplified
+		while (template_node->simplify(const_fold, stage, width_hint, sign_hint)) {};
+
+		switch (template_node->type)
+		{
+		case AST_WIRE: {
+			if (template_node->children.size() > 0 && template_node->children[0]->type == AST_RANGE)
+				width = range_width(this, template_node->children[0].get());
+			child->delete_children();
+			node = mkconst_int(child->location, width, true);
+			break;
+		}
+
+		case AST_STRUCT:
+		case AST_UNION: {
+			width = size_packed_struct(template_node, 0);
+			if (GetSize(children) > 1 && children[1]->type == AST_ASSIGN_PATTERN &&
+					assignment_pattern_is_named(children[1].get())) {
+				std::vector<AstNode*> members;
+				collect_struct_members(template_node, members);
+				if (members.empty())
+					children[1]->input_error("Named assignment pattern target is not a packed struct or union\n");
+				children[1] = elaborate_named_pattern(children[1].get(), members);
+				fixup_hierarchy_flags();
+			}
+			child->delete_children();
+			node = mkconst_int(child->location, width, false);
+			break;
+		}
+
+		default:
+			log_error("Don't know how to translate static cast of type %s\n", type2str(template_node->type));
+		}
+	}
+
+	children.erase(children.begin());
+	children.insert(children.begin(), std::move(node));
+	return true;
+}
+
 bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hint)
 {
 	static int recursion_counter = 0;
@@ -2260,66 +2325,8 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 		break;
 
 	case AST_CAST_SIZE: {
-		if (children[0]->type == AST_WIRE) {
-			int width = 1;
-			std::unique_ptr<AstNode> node;
-			auto* child = children[0].get();
-			if (child->children.size() == 0) {
-				// Base type (e.g., int)
-				width = child->range_left - child->range_right +1;
-				node = mkconst_int(child->location, width, child->is_signed);
-			} else {
-				// User defined type
-				log_assert(child->children[0]->type == AST_WIRETYPE);
-
-				const std::string &type_name = child->children[0]->str;
-				if (!current_scope.count(type_name))
-					input_error("Unknown identifier `%s' used as type name\n", type_name);
-				AstNode *resolved_type_node = current_scope.at(type_name);
-				if (resolved_type_node->type != AST_TYPEDEF)
-					input_error("`%s' does not name a type\n", type_name);
-				log_assert(resolved_type_node->children.size() == 1);
-				auto* template_node = resolved_type_node->children[0].get();
-
-				// Ensure typedef itself is fully simplified
-				while (template_node->simplify(const_fold, stage, width_hint, sign_hint)) {};
-
-				switch (template_node->type)
-				{
-				case AST_WIRE: {
-					if (template_node->children.size() > 0 && template_node->children[0]->type == AST_RANGE)
-						width = range_width(this, template_node->children[0].get());
-					child->delete_children();
-					node = mkconst_int(child->location, width, true);
-					break;
-				}
-
-				case AST_STRUCT:
-				case AST_UNION: {
-					width = size_packed_struct(template_node, 0);
-					if (GetSize(children) > 1 && children[1]->type == AST_ASSIGN_PATTERN &&
-							assignment_pattern_is_named(children[1].get())) {
-						std::vector<AstNode*> members;
-						collect_struct_members(template_node, members);
-						if (members.empty())
-							children[1]->input_error("Named assignment pattern target is not a packed struct or union\n");
-						children[1] = elaborate_named_pattern(children[1].get(), members);
-						fixup_hierarchy_flags();
-						did_something = true;
-					}
-					child->delete_children();
-					node = mkconst_int(child->location, width, false);
-					break;
-				}
-
-				default:
-					log_error("Don't know how to translate static cast of type %s\n", type2str(template_node->type));
-				}
-			}
-
-			children.erase(children.begin());
-			children.insert(children.begin(), std::move(node));
-		}
+		if (resolve_cast_type(const_fold, stage, width_hint, sign_hint))
+			did_something = true;
 
 		detect_width_simple = true;
 		children_are_self_determined = true;
