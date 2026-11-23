@@ -3525,6 +3525,32 @@ arg_list2:
 single_arg:
 	expr {
 		extra->ast_stack.back()->children.push_back(std::move($1));
+	} |
+	typedef_base_type range_or_multirange {
+		if (!mode->sv)
+			err_at_loc(@1, "Type arguments are only supported in SystemVerilog mode.");
+		auto *call = extra->ast_stack.back();
+		if (call->type != AST_FCALL || !(call->str == "\\$bits" || call->str == "\\$size" ||
+				call->str == "\\$left" || call->str == "\\$right" || call->str == "\\$high" ||
+				call->str == "\\$low" || call->str == "\\$increment" ||
+				call->str == "\\$dimensions" || call->str == "\\$unpacked_dimensions"))
+			err_at_loc(@1, "Type argument is only supported for array/bit query system functions.");
+		auto range = checkRange($1.get(), std::move($2));
+		if (range)
+			$1->children.push_back(std::move(range));
+		call->children.push_back(std::move($1));
+	} |
+	struct_type {
+		if (!mode->sv)
+			err_at_loc(@1, "Type arguments are only supported in SystemVerilog mode.");
+		auto *call = extra->ast_stack.back();
+		if (call->type != AST_FCALL || !(call->str == "\\$bits" || call->str == "\\$size" ||
+				call->str == "\\$left" || call->str == "\\$right" || call->str == "\\$high" ||
+				call->str == "\\$low" || call->str == "\\$increment" ||
+				call->str == "\\$dimensions" || call->str == "\\$unpacked_dimensions"))
+			err_at_loc(@1, "Type argument is only supported for array/bit query system functions.");
+		(void)extra->astbuf2.reset();
+		call->children.push_back(std::move($1));
 	};
 
 module_gen_body:
