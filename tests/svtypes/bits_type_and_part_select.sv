@@ -30,14 +30,17 @@ module top (
 	// Parameter overrides using $bits(type) and $bits(part_select)
 	sub #(.W($bits(t_t)), .V($bits(f[9:8]))) u_sub (.ow(sub_w), .ov(sub_v));
 
-	// Typedefs: struct, union, packed 2-D array, unpacked array, package typedef
+	// Typedefs: struct, struct alias, union, packed 2-D array, unpacked array, package typedef
 	typedef struct packed { logic a; logic [5:0] b; } s_t;
+	typedef s_t s_alias_t;
 	typedef union packed { logic [3:0] a; logic [3:0] b; } u_t;
 	typedef logic [2:0][3:0] arr2d_t;
 	typedef logic [7:0] uarr_t [0:3];
 
 	localparam int B_ENUM   = $bits(t_t);
 	localparam int B_STRUCT = $bits(s_t);
+	localparam int B_SALIAS = $bits(s_alias_t);
+	localparam int B_SALARR = $bits(s_alias_t [1:0]);
 	localparam int B_UNION  = $bits(u_t);
 	localparam int B_ARR2D  = $bits(arr2d_t);
 	localparam int B_UARR   = $bits(uarr_t);
@@ -171,4 +174,7 @@ module top (
 	always_comb assert(S_ASC1 == 2 && S_ASC2 == 8 && L_ASC1 == 1 && R_ASC1 == 2 && L_ASC2 == 0 && R_ASC2 == 7 && B_ASC == 16);
 	always_comb assert(D_DYN2 == 2 && S_DYN2_1 == 2 && S_DYN2_2 == 3 && B_DYN2 == 6);
 	always_comb assert(wide_bits == 32'd2);
+	s_alias_t s_alias_inst;
+	assign s_alias_inst = '{a: 1'b1, b: 6'h2A};
+	always_comb assert(B_SALIAS == 7 && B_SALARR == 14 && s_alias_inst.b == 6'h2A);
 endmodule

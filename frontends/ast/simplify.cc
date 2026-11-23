@@ -2720,14 +2720,15 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			// resolved.
 			while (template_node->is_custom_type && template_node->simplify(const_fold, stage, width_hint, sign_hint)) {};
 
-			if (str.empty() && (template_node->type == AST_STRUCT || template_node->type == AST_UNION)) {
+			bool add_packed_dimensions = (type == AST_WIRE && GetSize(children) > 1) || (type == AST_MEMORY && GetSize(children) > 2);
+			if (str.empty() && (add_packed_dimensions || type == AST_MEMORY) &&
+					(template_node->type == AST_STRUCT || template_node->type == AST_UNION)) {
 				auto tmp = template_node->clone();
 				while (tmp->simplify(true, stage, -1, false)) { }
 				int struct_width = tmp->range_valid ? (tmp->range_left - tmp->range_right + 1) : size_packed_struct(tmp.get(), 0);
 				newNode = std::make_unique<AstNode>(location, AST_WIRE, make_range(location, struct_width - 1, 0));
 				newNode->is_logic = true;
 				newNode->is_signed = template_node->is_signed;
-				bool add_packed_dimensions = (type == AST_WIRE && GetSize(children) > 1) || (type == AST_MEMORY && GetSize(children) > 2);
 				if (add_packed_dimensions)
 					prepend_ranges(newNode->children[0], children[1].get());
 				if (type == AST_MEMORY) {
@@ -2751,7 +2752,6 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 				// of structs (`e_t arr [1:2]`, `e_t [3:0] arr [1:2]`).
 				// make_packed_struct() only builds one element; attach any packed
 				// and unpacked array dimensions so the dimension pass resolves them.
-				bool add_packed_dimensions = (type == AST_WIRE && GetSize(children) > 1) || (type == AST_MEMORY && GetSize(children) > 2);
 				if (add_packed_dimensions)
 					prepend_ranges(newNode->children[0], children[1].get());
 				if (type == AST_MEMORY) {
@@ -2780,8 +2780,6 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 
 			// if an enum then add attributes to support simulator tracing
 			newNode->annotateTypedEnums(template_node.get());
-
-			bool add_packed_dimensions = (type == AST_WIRE && GetSize(children) > 1) || (type == AST_MEMORY && GetSize(children) > 2);
 
 			// Cannot add packed dimensions if unpacked dimensions are already specified.
 			if (add_packed_dimensions && newNode->type == AST_MEMORY)
