@@ -49,12 +49,23 @@ module top (
 	logic [1:0][2:0][3:0]  c3d_p_arr;
 	logic [4:2][3:0]       row_42;
 	logic [0:2][3:0]       row_asc;
+	logic signed [2:0][3:0] srow;
+	logic signed [2:0][3:0] srow_abc;
 	logic [1:0][2:0][3:0]  c3d_diff_bounds;
 	logic [1:0][2:0][3:0]  c3d_diff_dir;
+	logic [1:0][2:0][3:0]  c3d_signed_row;
+	logic [1:0][2:0][3:0]  c3d_signed_cast;
+	logic [1:0][2:0][3:0]  c3d_signed_lp;
+	logic [1:0][2:0][3:0]  c3d_signed_fn;
+	logic [1:0][2:0][3:0]  c3d_mixed_tern;
+	logic signed [1:0][2:0][3:0] sc3d_row;
+	logic signed [1:0][2:0][3:0] sc3d_srow;
 
 	typedef logic [2:0][3:0] arr3x4_t;
+	typedef logic signed [2:0][3:0] sarr3x4_t;
 	typedef logic [1:0][2:0][3:0] arr2x3x4_t;
 	localparam arr3x4_t ROW_LP = 12'h123;
+	localparam sarr3x4_t SROW_LP = 12'h123;
 	localparam arr3x4_t P_ARR = '{default: 4'hA};
 	localparam arr3x4_t P_ARR_IDX = '{0: 4'h1, default: 4'h5};
 	localparam logic [7:0] P_VEC = '{default: 1'b1};
@@ -63,6 +74,10 @@ module top (
 	arr3x4_t c_cast;
 
 	function automatic arr3x4_t make_row();
+		return 12'h123;
+	endfunction
+
+	function automatic sarr3x4_t make_srow();
 		return 12'h123;
 	endfunction
 
@@ -79,6 +94,8 @@ module top (
 		other_row    = 12'hABC;
 		row_42       = 12'h123;
 		row_asc      = 12'h123;
+		srow         = 12'h123;
+		srow_abc     = 12'hABC;
 		c2d          = '{default: 4'd5};
 		c3d          = '{default: 4'hA};
 		c3d_nested   = '{default: '{default: 4'hC}};
@@ -105,6 +122,13 @@ module top (
 		c3d_p_arr    = '{default: P_ARR};
 		c3d_diff_bounds = '{default: row_42};
 		c3d_diff_dir    = '{default: row_asc};
+		c3d_signed_row  = '{default: srow};
+		c3d_signed_cast = '{default: sarr3x4_t'(12'h123)};
+		c3d_signed_lp   = '{default: SROW_LP};
+		c3d_signed_fn   = '{default: make_srow()};
+		c3d_mixed_tern  = '{default: i[0] ? row : srow_abc};
+		sc3d_row        = '{default: row};
+		sc3d_srow       = '{default: srow};
 		c2d_bit_def  = '{default: 1'b1};
 		c2d_idx_bit_def = '{0: 4'hA, default: 1'b1};
 		c3d_bit_def  = '{default: 1'b1};
@@ -152,6 +176,13 @@ module top (
 	always_comb assert(c3d_p_arr == 24'hAAAAAA);
 	always_comb assert(c3d_diff_bounds == 24'h333333);
 	always_comb assert(c3d_diff_dir == 24'h333333);
+	always_comb assert(c3d_signed_row == 24'h333333);
+	always_comb assert(c3d_signed_cast == 24'h333333);
+	always_comb assert(c3d_signed_lp == 24'h333333);
+	always_comb assert(c3d_signed_fn == 24'h333333);
+	always_comb assert(c3d_mixed_tern === (i[0] ? 24'h333333 : 24'hCCCCCC));
+	always_comb assert(sc3d_row == 24'h123123);
+	always_comb assert(sc3d_srow == 24'h333333);
 	always_comb assert(c2d_bit_def == 8'h11);
 	always_comb assert(c2d_idx_bit_def == 8'h1A);
 	always_comb assert(c3d_bit_def == 24'h111111);
