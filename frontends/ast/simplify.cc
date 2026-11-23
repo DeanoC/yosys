@@ -1617,6 +1617,10 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs, bool 
 	if (lhs->type == AST_SELFSZ && lhs->children.size() == 1)
 		return packed_dims_for_lhs(lhs->children[0].get(), out_signed, out_signed_sub_len);
 
+	if (lhs->type == AST_TO_SIGNED && lhs->children.size() == 1 &&
+			lhs->children[0]->type == AST_IDENTIFIER && lhs->children[0]->get_struct_member())
+		return packed_dims_for_lhs(lhs->children[0].get(), out_signed, out_signed_sub_len);
+
 	if (lhs->type == AST_TERNARY && lhs->children.size() == 3) {
 		bool t_signed = false, f_signed = false;
 		auto t_dims = packed_dims_for_lhs(lhs->children[1].get(), &t_signed);

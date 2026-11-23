@@ -85,9 +85,17 @@ module top (
 		logic [2:0][3:0] arr;
 		logic            en;
 	} wrap_t;
+	typedef struct packed {
+		logic signed [2:0][3:0] sarr;
+		logic                   en;
+	} swrap_t;
 	localparam wrap_t P_WRAP = '{arr: '{default: 4'h6}, en: 1'b1};
 	wrap_t c_struct;
 	wrap_t c_struct_sub;
+	swrap_t c_swrap;
+	swrap_t c_swrap_sub;
+	swrap_t c_swrap_123;
+	logic [1:0][2:0][3:0] c3d_swrap_sarr;
 
 	always_comb begin
 		row          = 12'h123;
@@ -108,6 +116,12 @@ module top (
 		c_struct     = '{arr: '{default: 4'h6}, en: 1'b1};
 		c_struct_sub = '0;
 		c_struct_sub.arr[1] = '{default: 1'b1};
+		c_swrap      = '0;
+		c_swrap.sarr = '{default: 4'hA};
+		c_swrap_sub  = '0;
+		c_swrap_sub.sarr[1][2:1] = '{default: 1'b1};
+		c_swrap_123  = '{sarr: 12'h123, en: 1'b1};
+		c3d_swrap_sarr = '{default: c_swrap_123.sarr};
 		c3d_row      = '{default: row};
 		c3d_idx_row  = '{0: other_row, default: row};
 		c3d_idx_leaf = '{0: other_row, default: 4'h5};
@@ -156,6 +170,9 @@ module top (
 	always_comb assert(c_cast == {3{4'h9}});
 	always_comb assert(c_struct.arr == {3{4'h6}} && c_struct.en == 1'b1);
 	always_comb assert(c_struct_sub.arr == 12'h0F0 && c_struct_sub.en == 1'b0);
+	always_comb assert(c_swrap.sarr == 12'shAAA && c_swrap.en == 1'b0);
+	always_comb assert(c_swrap_sub.sarr == 12'sh060 && c_swrap_sub.en == 1'b0);
+	always_comb assert(c3d_swrap_sarr == 24'h333333);
 	always_comb assert(c3d_row == {12'h123, 12'h123});
 	always_comb assert(c3d_idx_row == {12'h123, 12'hABC});
 	always_comb assert(c3d_idx_leaf == {12'h555, 12'hABC});
