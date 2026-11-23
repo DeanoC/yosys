@@ -1,0 +1,26 @@
+read_verilog -sv concurrent_assert_property.sv
+hierarchy -top repro
+proc
+check -assert
+
+design -reset
+read_verilog -sv -formal concurrent_assert_property.sv
+prep -top top
+check -assert
+select -assert-count 1 c:a_dis
+select -assert-count 1 c:a_bool
+select -assert-count 1 c:a_chain
+select -assert-count 1 c:a_unclk
+select -assert-count 1 c:m_assume
+select -assert-count 1 c:c_cover
+select -assert-count 1 c:r_restr
+select -assert-count 1 c:g_assert
+async2sync
+chformal -cover -remove
+sat -seq 3 -set-init-undef -verify -prove-asserts
+
+design -reset
+read_verilog -sv -noassert concurrent_assert_property.sv
+hierarchy -top repro
+proc
+select -assert-count 0 t:$check

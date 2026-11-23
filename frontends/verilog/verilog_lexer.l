@@ -428,6 +428,8 @@ TIME_SCALE_SUFFIX [munpf]?s
 
 "eventually"   { if (mode->formal) return parser::make_TOK_EVENTUALLY(out_loc); SV_KEYWORD(parser::make_TOK_EVENTUALLY(out_loc)); }
 "s_eventually" { if (mode->formal) return parser::make_TOK_EVENTUALLY(out_loc); SV_KEYWORD(parser::make_TOK_EVENTUALLY(out_loc)); }
+"disable"      { if (mode->formal) return parser::make_TOK_DISABLE(out_loc); SV_KEYWORD(parser::make_TOK_DISABLE(out_loc)); }
+"iff"          { if (mode->formal) return parser::make_TOK_IFF(out_loc); SV_KEYWORD(parser::make_TOK_IFF(out_loc)); }
 
 "input"   { return parser::make_TOK_INPUT(out_loc); }
 "output"  { return parser::make_TOK_OUTPUT(out_loc); }
@@ -670,6 +672,7 @@ import[ \t\r\n]+\"(DPI|DPI-C)\"[ \t\r\n]+function[ \t\r\n]+ {
 
 ".*" { return parser::make_TOK_WILDCARD_CONNECT(out_loc); }
 
+"|->" { if (mode->sv || mode->formal) return parser::make_TOK_SVA_OVERLAP_IMPLIES(out_loc); REJECT; }
 "|=" { SV_KEYWORD(parser::make_TOK_BIT_OR_ASSIGN(out_loc)); }
 "&=" { SV_KEYWORD(parser::make_TOK_BIT_AND_ASSIGN(out_loc)); }
 "+=" { SV_KEYWORD(parser::make_TOK_ADD_ASSIGN(out_loc)); }
