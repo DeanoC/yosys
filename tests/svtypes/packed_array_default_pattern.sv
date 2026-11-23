@@ -107,6 +107,10 @@ module top (
 		logic [3:0] a;
 		logic [3:0] b;
 	} pair8_t;
+	typedef struct packed {
+		logic [3:0] x;
+		logic [3:0] y;
+	} other8_t;
 	localparam wrap_t P_WRAP = '{arr: '{default: 4'h6}, en: 1'b1};
 	localparam pair8_t P_PAIR = '{a: 4'hA, b: 4'h5};
 	wrap_t c_struct;
@@ -129,6 +133,10 @@ module top (
 	pair8_t [1:0] c_pair_idx_scalar;
 	pair8_t [1:0] c_pair_cast_def;
 	pair8_t [1:0][2:0] c_pair_2d_scalar;
+	pair8_t [2:0] pair_row;
+	other8_t [2:0] other_struct_row;
+	pair8_t [1:0][2:0] c_pair_2d_match_row;
+	pair8_t [1:0][2:0] c_pair_2d_other_row;
 	wrap_t  [1:0] c_wrap_scalar;
 	souter_t      c_souter_scalar;
 	logic [1:0][2:0][3:0] c3d_swrap_sarr;
@@ -176,6 +184,10 @@ module top (
 		c_pair_idx_scalar = '{0: 8'h12, default: 4'hA};
 		c_pair_cast_def   = '{default: pair8_t'(8'hA5)};
 		c_pair_2d_scalar  = '{default: 4'hA};
+		pair_row            = 24'h123456;
+		other_struct_row    = 24'h123456;
+		c_pair_2d_match_row = '{default: pair_row};
+		c_pair_2d_other_row = '{default: other_struct_row};
 		c_wrap_scalar     = '{default: 4'h5};
 		c_souter_scalar   = '{default: 4'h5};
 		c3d_swrap_sarr = '{default: c_swrap_123.sarr};
@@ -242,6 +254,7 @@ module top (
 	always_comb assert(c_pair_2x2_pos == {4{8'hA5}} && c_pair_2x2_slice == {2{8'h12, 8'h34}});
 	always_comb assert(c_pair_scalar_def == 16'hAAAA && c_pair_idx_scalar == 16'hAA12);
 	always_comb assert(c_pair_cast_def == 16'hA5A5 && c_pair_2d_scalar == {6{8'hAA}});
+	always_comb assert(c_pair_2d_match_row == {2{24'h123456}} && c_pair_2d_other_row == {6{8'h66}});
 	always_comb assert(c_wrap_scalar == {2{12'h555, 1'b1}} && c_souter_scalar == {8'h55, 1'b1});
 	always_comb assert(c3d_swrap_sarr == 24'h333333);
 	always_comb assert(c3d_unsigned_srow == 24'h123123);
