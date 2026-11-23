@@ -1394,28 +1394,22 @@ static void collect_scope_members(const std::string &prefix, std::vector<AstNode
 	}
 }
 
-// Packed struct or union members of an assignment target. Typedef instances are
-// recovered from the wiretype attribute; anonymous structs from the member scope
-// entries created when the struct was packed.
-static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
+static std::vector<AstNode*> members_for_decl(AstNode *decl)
 {
 	std::vector<AstNode*> members;
-	AstNode *wire = lhs->id2ast;
+	if (!decl)
+		return members;
 	AstNode *stype = nullptr;
-	if (AstNode *member = lhs->get_struct_member()) {
-		if (member->type == AST_STRUCT || member->type == AST_UNION)
-			stype = member;
-	}
-	if (!stype && wire && (wire->type == AST_STRUCT || wire->type == AST_UNION))
-		stype = wire;
-	else if (!stype && wire) {
-		if (AstNode *member = wire->get_struct_member()) {
+	if (decl->type == AST_STRUCT || decl->type == AST_UNION)
+		stype = decl;
+	else {
+		if (AstNode *member = decl->get_struct_member()) {
 			if (member->type == AST_STRUCT || member->type == AST_UNION)
 				stype = member;
 		}
 		if (!stype) {
-			auto it = wire->attributes.find(ID::wiretype);
-			if (it != wire->attributes.end() && it->second) {
+			auto it = decl->attributes.find(ID::wiretype);
+			if (it != decl->attributes.end() && it->second) {
 				std::string tname = it->second->str;
 				if (tname.empty() && it->second->is_string)
 					tname = it->second->bitsAsConst().decode_string();
@@ -1434,6 +1428,27 @@ static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
 		size_packed_struct(stype, 0);
 	if (stype)
 		collect_struct_members(stype, members);
+	if (members.empty())
+		collect_scope_members(decl->str, members);
+	return members;
+}
+
+// Packed struct or union members of an assignment target. Typedef instances are
+// recovered from the wiretype attribute; anonymous structs from the member scope
+// entries created when the struct was packed.
+static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
+{
+	std::vector<AstNode*> members;
+	if (AstNode *member = lhs->get_struct_member()) {
+		if (member->type == AST_STRUCT || member->type == AST_UNION) {
+			if (!member->range_valid)
+				size_packed_struct(member, 0);
+			collect_struct_members(member, members);
+			if (!members.empty())
+				return members;
+		}
+	}
+	members = members_for_decl(lhs->id2ast);
 	if (members.empty())
 		collect_scope_members(lhs->str, members);
 	return members;
@@ -1566,6 +1581,26 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs)
 			dims.push_back({r->range_right, r->range_left - r->range_right + 1, r->range_swapped});
 		}
 		return dims;
+	}
+
+	if (lhs->type == AST_SELFSZ && lhs->children.size() == 1)
+		return packed_dims_for_lhs(lhs->children[0].get());
+
+	if (lhs->type == AST_TERNARY && lhs->children.size() == 3) {
+		auto t_dims = packed_dims_for_lhs(lhs->children[1].get());
+		auto f_dims = packed_dims_for_lhs(lhs->children[2].get());
+		if (!t_dims.empty() && t_dims.size() == f_dims.size()) {
+			bool same = true;
+			for (size_t i = 0; i < t_dims.size(); i++) {
+				if (t_dims[i].range_width != f_dims[i].range_width) {
+					same = false;
+					break;
+				}
+			}
+			if (same)
+				return t_dims;
+		}
+		return {};
 	}
 
 	if (lhs->type != AST_IDENTIFIER || lhs->id2ast == nullptr)
@@ -4420,6 +4455,41 @@ skip_dynamic_range_lvalue_expansion:;
 				input_error("Named assignment pattern requires a whole struct, union, or packed array target.\n");
 			} else {
 				children[0]->input_error("Named assignment pattern target `%s' is not a packed struct or union\n", children[0]->str);
+			}
+		}
+	}
+
+	if ((type == AST_PARAMETER || type == AST_LOCALPARAM) && !is_custom_type &&
+			!children.empty() && children[0]->type == AST_ASSIGN_PATTERN &&
+			(assignment_pattern_is_named(children[0].get()) || assignment_pattern_has_index_key(children[0].get())))
+	{
+		auto members = members_for_decl(this);
+		if (!members.empty()) {
+			children[0] = elaborate_named_pattern(children[0].get(), members);
+			fixup_hierarchy_flags();
+			did_something = true;
+		} else {
+			std::vector<AstNode::dimension_t> pdims;
+			if (!dimensions.empty() && unpacked_dimensions == 0) {
+				pdims = dimensions;
+			} else if (children.size() > 1 && children[1]->type == AST_RANGE && children[1]->range_valid) {
+				pdims.push_back({children[1]->range_right, children[1]->range_left - children[1]->range_right + 1, children[1]->range_swapped});
+			} else if (children.size() > 1 && children[1]->type == AST_MULTIRANGE && !children[1]->children.empty()) {
+				bool all_valid = true;
+				for (auto &r : children[1]->children) {
+					if (r->type != AST_RANGE || !r->range_valid) {
+						all_valid = false;
+						break;
+					}
+					pdims.push_back({r->range_right, r->range_left - r->range_right + 1, r->range_swapped});
+				}
+				if (!all_valid)
+					pdims.clear();
+			}
+			if (!pdims.empty()) {
+				children[0] = elaborate_packed_array_pattern(children[0].get(), pdims, 0);
+				fixup_hierarchy_flags();
+				did_something = true;
 			}
 		}
 	}

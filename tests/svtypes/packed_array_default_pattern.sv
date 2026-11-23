@@ -44,9 +44,18 @@ module top (
 	logic [1:0][2:0][3:0]  c3d_bit_def;
 	logic [1:0][2:0][3:0]  c3d_fn_row;
 	logic [1:0][2:0][3:0]  c3d_idx_fn_row;
+	logic [1:0][2:0][3:0]  c3d_tern_row;
+	logic [1:0][2:0][3:0]  c3d_idx_tern_row;
+	logic [1:0][2:0][3:0]  c3d_p_arr;
 
 	typedef logic [2:0][3:0] arr3x4_t;
+	typedef logic [1:0][2:0][3:0] arr2x3x4_t;
 	localparam arr3x4_t ROW_LP = 12'h123;
+	localparam arr3x4_t P_ARR = '{default: 4'hA};
+	localparam arr3x4_t P_ARR_IDX = '{0: 4'h1, default: 4'h5};
+	localparam logic [7:0] P_VEC = '{default: 1'b1};
+	localparam arr2x3x4_t P_3D_SUB = '{default: P_ARR};
+	parameter arr3x4_t PARAM_ARR = '{default: 4'h3};
 	arr3x4_t c_cast;
 
 	function automatic arr3x4_t make_row();
@@ -57,6 +66,7 @@ module top (
 		logic [2:0][3:0] arr;
 		logic            en;
 	} wrap_t;
+	localparam wrap_t P_WRAP = '{arr: '{default: 4'h6}, en: 1'b1};
 	wrap_t c_struct;
 	wrap_t c_struct_sub;
 
@@ -84,6 +94,9 @@ module top (
 		c3d_idx_lp_row = '{0: other_row, default: ROW_LP};
 		c3d_fn_row   = '{default: make_row()};
 		c3d_idx_fn_row = '{0: other_row, default: make_row()};
+		c3d_tern_row = '{default: i[0] ? row : other_row};
+		c3d_idx_tern_row = '{0: row, default: i[0] ? other_row : ROW_LP};
+		c3d_p_arr    = '{default: P_ARR};
 		c2d_bit_def  = '{default: 1'b1};
 		c2d_idx_bit_def = '{0: 4'hA, default: 1'b1};
 		c3d_bit_def  = '{default: 1'b1};
@@ -120,6 +133,15 @@ module top (
 	always_comb assert(c3d_idx_lp_row == {12'h123, 12'hABC});
 	always_comb assert(c3d_fn_row == {12'h123, 12'h123});
 	always_comb assert(c3d_idx_fn_row == {12'h123, 12'hABC});
+	always_comb assert(c3d_tern_row === (i[0] ? {12'h123, 12'h123} : {12'hABC, 12'hABC}));
+	always_comb assert(c3d_idx_tern_row === (i[0] ? {12'hABC, 12'h123} : {12'h123, 12'h123}));
+	always_comb assert(P_ARR == 12'hAAA);
+	always_comb assert(P_ARR_IDX == 12'h551);
+	always_comb assert(P_VEC == 8'hFF);
+	always_comb assert(P_3D_SUB == 24'hAAAAAA);
+	always_comb assert(PARAM_ARR == 12'h333);
+	always_comb assert(P_WRAP == {12'h666, 1'b1});
+	always_comb assert(c3d_p_arr == 24'hAAAAAA);
 	always_comb assert(c2d_bit_def == 8'hFF);
 	always_comb assert(c2d_idx_bit_def == 8'hFA);
 	always_comb assert(c3d_bit_def == 24'hFFFFFF);
