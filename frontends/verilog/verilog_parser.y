@@ -3124,9 +3124,12 @@ for_initialization:
 		extra->ast_stack.back()->children.push_back(std::move(node));
 	} |
 	non_io_wire_type range TOK_ID {
+		extra->expecting_wire_name = false;
 		err_at_loc(@3, "For loop variable declaration is missing initialization!");
 	} |
-	non_io_wire_type range TOK_ID TOK_EQ expr {
+	non_io_wire_type range TOK_ID TOK_EQ {
+		extra->expecting_wire_name = false;
+	} expr {
 		if (!mode->sv)
 			err_at_loc(@4, "For loop inline variable declaration is only supported in SystemVerilog mode!");
 
@@ -3148,8 +3151,8 @@ for_initialization:
 
 		// loop variable initialization
 		SET_AST_NODE_LOC(ident.get(), @3, @3);
-		auto asgn = std::make_unique<AstNode>(@$, AST_ASSIGN_EQ, std::move(ident), std::move($5));
-		SET_AST_NODE_LOC(asgn.get(), @3, @5);
+		auto asgn = std::make_unique<AstNode>(@$, AST_ASSIGN_EQ, std::move(ident), std::move($6));
+		SET_AST_NODE_LOC(asgn.get(), @3, @6);
 		loop->children.push_back(std::move(asgn));
 
 		// inject a wrapping block to declare the loop variable and
