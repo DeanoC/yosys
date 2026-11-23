@@ -2313,6 +2313,16 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			if (!children[1]->range_valid)
 				input_error("Non-constant width range on parameter decl.\n");
 			width_hint = max(width_hint, children[1]->range_left - children[1]->range_right + 1);
+		} else if (children.size() > 1 && children[1]->type == AST_MULTIRANGE) {
+			while (!children[1]->basic_prep && children[1]->simplify(false, stage, -1, false) == true)
+				did_something = true;
+			int total_width = 1;
+			for (auto &range : children[1]->children) {
+				if (!range->range_valid)
+					input_error("Non-constant width range on parameter decl.\n");
+				total_width *= range->range_left - range->range_right + 1;
+			}
+			width_hint = max(width_hint, total_width);
 		}
 		break;
 	case AST_ENUM_ITEM:
@@ -2944,8 +2954,35 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 		}
 	}
 
+	// Resolve packed ranges in parameter/localparam declarations.
+	if ((type == AST_PARAMETER || type == AST_LOCALPARAM) && dimensions.empty() && children.size() > 1) {
+		if (children[1]->type == AST_MULTIRANGE) {
+			bool all_valid = true;
+			for (auto &range : children[1]->children)
+				if (!range->range_valid)
+					all_valid = false;
+			if (all_valid) {
+				int width = 1;
+				for (auto &range : children[1]->children)
+					width *= add_dimension(this, range.get());
+				auto loc = children[1]->location;
+				auto flat_range = std::make_unique<AstNode>(loc, AST_RANGE, mkconst_int(loc, width - 1, true), mkconst_int(loc, 0, true));
+				flat_range->range_valid = true;
+				flat_range->range_left = width - 1;
+				flat_range->range_right = 0;
+				children[1] = std::move(flat_range);
+				fixup_hierarchy_flags();
+				did_something = true;
+			}
+		} else if (children[1]->type == AST_RANGE && children[1]->range_valid) {
+			add_dimension(this, children[1].get());
+		}
+	}
+
 	// Resolve multidimensional array access.
-	if (type == AST_IDENTIFIER && !basic_prep && id2ast && (id2ast->type == AST_WIRE || id2ast->type == AST_MEMORY) &&
+	if (type == AST_IDENTIFIER && !basic_prep && id2ast &&
+		(id2ast->type == AST_WIRE || id2ast->type == AST_MEMORY || id2ast->type == AST_PARAMETER || id2ast->type == AST_LOCALPARAM) &&
+		!(id2ast->children.size() > 1 && id2ast->children[1]->type == AST_MULTIRANGE) &&
 		children.size() > 0 && (children[0]->type == AST_RANGE || children[0]->type == AST_MULTIRANGE))
 	{
 		int dims_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.size() : 1;
@@ -5387,8 +5424,14 @@ replace_fcall_later:;
 		{
 		case AST_IDENTIFIER:
 			if (current_scope.count(str) > 0 && (current_scope[str]->type == AST_PARAMETER || current_scope[str]->type == AST_LOCALPARAM || current_scope[str]->type == AST_ENUM_ITEM)) {
-				if (current_scope[str]->children[0]->type == AST_CONSTANT) {
+				if (current_scope[str]->children.size() > 1 && current_scope[str]->children[1]->type == AST_MULTIRANGE) {
+					did_something = true;
+				} else if (current_scope[str]->children[0]->type == AST_CONSTANT) {
 					if (children.size() != 0 && children[0]->type == AST_RANGE && children[0]->range_valid) {
+						if (!basic_prep && GetSize(current_scope[str]->dimensions) > 1) {
+							did_something = true;
+							break;
+						}
 						std::vector<RTLIL::State> data;
 						bool param_upto = current_scope[str]->range_valid && current_scope[str]->range_swapped;
 						int param_offset = current_scope[str]->range_valid ? current_scope[str]->range_right : 0;

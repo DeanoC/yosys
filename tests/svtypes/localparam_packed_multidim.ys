@@ -1,0 +1,4 @@
+read_verilog -sv localparam_packed_multidim.sv
+prep -top top
+async2sync
+sat -verify -prove-asserts
