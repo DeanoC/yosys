@@ -146,6 +146,11 @@ module top (
 	logic [1:0][2:0][3:0] c3d_swrap_sarr;
 	logic [1:0][2:0][3:0] c3d_unsigned_srow;
 	logic [1:0][2:0][3:0] c3d_signed_row_cast;
+	logic [1:0][2:0][3:0] c3d_unsigned_row;
+	logic [1:0][2:0][3:0] c3d_dollar_unsigned_srow;
+	spair_t               c_spair_signed_cast;
+	spair_t               c_spair_dollar_signed;
+	pair8_t [1:0]         c_pair_unsigned_cast;
 
 	always_comb begin
 		row          = 12'h123;
@@ -199,6 +204,11 @@ module top (
 		c3d_swrap_sarr = '{default: c_swrap_123.sarr};
 		c3d_unsigned_srow   = '{default: unsigned'(srow)};
 		c3d_signed_row_cast = '{default: signed'(row)};
+		c3d_unsigned_row         = '{default: unsigned'(row)};
+		c3d_dollar_unsigned_srow = '{default: $unsigned(srow)};
+		c_spair_signed_cast      = '{default: signed'(srow)};
+		c_spair_dollar_signed    = '{default: $signed(row)};
+		c_pair_unsigned_cast     = '{default: unsigned'(P_PAIR)};
 		c3d_row      = '{default: row};
 		c3d_idx_row  = '{0: other_row, default: row};
 		c3d_idx_leaf = '{0: other_row, default: 4'h5};
@@ -266,8 +276,13 @@ module top (
 	always_comb assert(c_wrap_def.arr == 12'h005 && c_wrap_def.en == 1'b1 && P_WRAP_DEF == {12'h005, 1'b1});
 	always_comb assert(c_swrap_def.sarr == 12'sh005 && c_swrap_def.en == 1'b1);
 	always_comb assert(c3d_swrap_sarr == 24'h333333);
-	always_comb assert(c3d_unsigned_srow == 24'h123123);
+	// Signing casts yield a plain [n-1:0] vector (IEEE 1800-2017 6.24.1): they never match a
+	// multidimensional packed subarray or a struct element, so the default recurses to the leaves.
+	always_comb assert(c3d_unsigned_srow == 24'h333333);
 	always_comb assert(c3d_signed_row_cast == 24'h333333);
+	always_comb assert(c3d_unsigned_row == 24'h333333 && c3d_dollar_unsigned_srow == 24'h333333);
+	always_comb assert(c_spair_signed_cast == 24'h333333 && c_spair_dollar_signed == 24'h333333);
+	always_comb assert(c_pair_unsigned_cast == 16'h5555);
 	always_comb assert(c3d_row == {12'h123, 12'h123});
 	always_comb assert(c3d_idx_row == {12'h123, 12'hABC});
 	always_comb assert(c3d_idx_leaf == {12'h555, 12'hABC});
@@ -283,7 +298,7 @@ module top (
 	always_comb assert(P_ARR_IDX == 12'h551);
 	always_comb assert(P_VEC == 8'hFF);
 	always_comb assert(P_3D_SUB == 24'hAAAAAA);
-	always_comb assert(P_UNSIGNED_LP == 24'h123123);
+	always_comb assert(P_UNSIGNED_LP == 24'h333333);
 	always_comb assert(P_CONST_TERN == 24'h123123);
 	always_comb assert(PARAM_ARR == 12'h333);
 	always_comb assert(P_WRAP == {12'h666, 1'b1});

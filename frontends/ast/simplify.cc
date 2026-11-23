@@ -1475,6 +1475,26 @@ static AstNode *unwrap_signed_member_target(AstNode *lhs)
 	return lhs;
 }
 
+// A reference to a signed packed struct member is rewritten into an identifier
+// wrapped in AST_TO_SIGNED (see the struct member rewrite in simplify() and
+// struct_array_field_select()). That wrapper keeps the member's declared type.
+// Any other AST_TO_SIGNED/AST_TO_UNSIGNED is a signing cast (signed'(x),
+// unsigned'(x), $signed(x), $unsigned(x)), whose result IEEE 1800-2017 6.24.1
+// defines as a simple vector with a single [n-1:0] packed dimension.
+static bool is_signed_member_ref(AstNode *node)
+{
+	if (node->type != AST_TO_SIGNED || node->children.size() != 1)
+		return false;
+	AstNode *ref = node->children[0].get();
+	if (ref->type != AST_IDENTIFIER)
+		return false;
+	if (AstNode *member = ref->get_struct_member())
+		return member->is_signed;
+	auto it = ref->attributes.find(struct_array_member_attr());
+	return it != ref->attributes.end() && it->second && it->second->is_signed &&
+			!ref->attributes.count(struct_array_member_width_attr());
+}
+
 static AstNode *indexed_struct_elem_type(AstNode *lhs)
 {
 	if (lhs->type != AST_IDENTIFIER || !lhs->id2ast || !lhs->basic_prep || lhs->integer == 0)
@@ -1500,10 +1520,10 @@ static AstNode *struct_type_for_expr(AstNode *expr)
 	if (expr->type == AST_SELFSZ && expr->children.size() == 1)
 		return struct_type_for_expr(expr->children[0].get());
 	if ((expr->type == AST_TO_SIGNED || expr->type == AST_TO_UNSIGNED) && expr->children.size() == 1) {
-		AstNode *st = struct_type_for_expr(expr->children[0].get());
-		if (st && st->is_signed == (expr->type == AST_TO_SIGNED))
-			return st;
-		return nullptr;
+		// A signing cast yields a plain [n-1:0] vector, not the operand's struct type.
+		if (!is_signed_member_ref(expr))
+			return nullptr;
+		return struct_type_for_expr(expr->children[0].get());
 	}
 	if (expr->type == AST_TERNARY && expr->children.size() == 3) {
 		AstNode *t_st = struct_type_for_expr(expr->children[1].get());
@@ -1741,6 +1761,20 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs, bool 
 		return packed_dims_for_lhs(lhs->children[0].get(), out_signed, out_signed_sub_len, out_elem_stype);
 
 	if ((lhs->type == AST_TO_SIGNED || lhs->type == AST_TO_UNSIGNED) && lhs->children.size() == 1) {
+		if (!is_signed_member_ref(lhs)) {
+			// signed'(x), unsigned'(x), $signed(x) and $unsigned(x) do not keep the
+			// operand's packed array shape: the result has a single [n-1:0] dimension
+			// with the cast's signedness (IEEE 1800-2017 6.24.1).
+			auto operand_dims = packed_dims_for_lhs(lhs->children[0].get());
+			if (operand_dims.empty())
+				return {};
+			int width = 1;
+			for (const auto &d : operand_dims)
+				width *= d.range_width;
+			if (out_signed)
+				*out_signed = (lhs->type == AST_TO_SIGNED);
+			return {{0, width, false}};
+		}
 		auto dims = packed_dims_for_lhs(lhs->children[0].get(), out_signed, out_signed_sub_len, out_elem_stype);
 		if (!dims.empty() && out_signed) {
 			bool sliced_struct_member = (lhs->type == AST_TO_SIGNED && lhs->children[0]->type == AST_IDENTIFIER &&
@@ -6250,19 +6284,9 @@ replace_fcall_later:;
 		case AST_TO_UNSIGNED:
 			if (children[0]->type == AST_CONSTANT) {
 				RTLIL::Const y = children[0]->bitsAsConst(width_hint, sign_hint);
+				// The folded signing cast is a plain [n-1:0] vector (IEEE 1800-2017 6.24.1),
+				// so the operand's packed array/struct type attributes are not carried over.
 				newNode = mkconst_bits(location, y.to_bits(), type == AST_TO_SIGNED);
-				auto cast_it = children[0]->attributes.find(cast_type_dims_attr());
-				if (cast_it != children[0]->attributes.end()) {
-					auto dims_attr = cast_it->second->clone();
-					dims_attr->is_signed = (type == AST_TO_SIGNED);
-					newNode->set_attribute(cast_type_dims_attr(), std::move(dims_attr));
-				}
-				auto struct_it = children[0]->attributes.find(cast_type_struct_attr());
-				if (struct_it != children[0]->attributes.end()) {
-					AstNode *st = struct_elem_type_for_decl(children[0].get());
-					if (st && st->is_signed == (type == AST_TO_SIGNED))
-						newNode->set_attribute(cast_type_struct_attr(), struct_it->second->clone());
-				}
 			}
 			break;
 		if (0) { case AST_BIT_AND:  const_func = RTLIL::const_and;  }
