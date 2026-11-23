@@ -1582,25 +1582,29 @@ static std::unique_ptr<AstNode> make_dims_multirange(AstSrcLocType loc, const st
 
 static int signed_subarray_len_for_decl(AstNode *decl)
 {
-	if (!decl)
-		return -1;
-	auto it = decl->attributes.find(ID::wiretype);
-	if (it == decl->attributes.end() || !it->second)
-		return -1;
-	std::string tname = it->second->str;
-	if (tname.empty() && it->second->is_string)
-		tname = it->second->bitsAsConst().decode_string();
-	if (!tname.empty() && tname[0] != '\\')
-		tname = "\\" + tname;
-	if (tname.empty() || !current_scope.count(tname))
-		return -1;
-	AstNode *td = current_scope.at(tname);
-	if (td->type == AST_TYPEDEF && td->children.size() == 1) {
+	AstNode *cur = decl;
+	int result = -1;
+	std::set<std::string> visited;
+	while (cur) {
+		auto it = cur->attributes.find(ID::wiretype);
+		if (it == cur->attributes.end() || !it->second)
+			break;
+		std::string tname = it->second->str;
+		if (tname.empty() && it->second->is_string)
+			tname = it->second->bitsAsConst().decode_string();
+		if (!tname.empty() && tname[0] != '\\')
+			tname = "\\" + tname;
+		if (tname.empty() || !visited.insert(tname).second || !current_scope.count(tname))
+			break;
+		AstNode *td = current_scope.at(tname);
+		if (td->type != AST_TYPEDEF || td->children.size() != 1)
+			break;
 		AstNode *tmpl = td->children[0].get();
-		if (tmpl->is_signed && tmpl->unpacked_dimensions == 0 && GetSize(tmpl->dimensions) >= 2)
-			return GetSize(tmpl->dimensions);
+		if (tmpl->is_signed && tmpl->unpacked_dimensions == 0)
+			result = GetSize(tmpl->dimensions) >= 2 ? GetSize(tmpl->dimensions) : -1;
+		cur = tmpl;
 	}
-	return -1;
+	return result;
 }
 
 static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs, bool *out_signed = nullptr, int *out_signed_sub_len = nullptr)
@@ -3203,6 +3207,28 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			if (add_packed_dimensions && newNode->type == AST_MEMORY)
 				input_error("Cannot extend unpacked type `%s' with packed dimensions\n", type_name);
 
+			// If template_node already flattened multi-dimensional ranges into dimensions,
+			// restore them as AST_MULTIRANGE before prepending additional dimensions.
+			if ((add_packed_dimensions || type == AST_MEMORY) && !newNode->dimensions.empty()) {
+				auto rebuild_multirange = [&](int begin_dim, int end_dim) {
+					auto mr = std::make_unique<AstNode>(location, AST_MULTIRANGE);
+					for (int d = begin_dim; d < end_dim; d++) {
+						const auto &dim = newNode->dimensions[d];
+						int low = dim.range_right;
+						int high = low + dim.range_width - 1;
+						int left = dim.range_swapped ? low : high;
+						int right = dim.range_swapped ? high : low;
+						mr->children.push_back(make_range(location, left, right));
+					}
+					return mr;
+				};
+				int packed_dims = GetSize(newNode->dimensions) - newNode->unpacked_dimensions;
+				if (packed_dims > 1 && !newNode->children.empty())
+					newNode->children[0] = rebuild_multirange(newNode->unpacked_dimensions, GetSize(newNode->dimensions));
+				if (newNode->unpacked_dimensions > 1 && GetSize(newNode->children) >= 2)
+					newNode->children[1] = rebuild_multirange(0, newNode->unpacked_dimensions);
+			}
+
 			// Add packed dimensions.
 			if (add_packed_dimensions) {
 				auto& packed = children[1];
@@ -3227,6 +3253,8 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			if (add_packed_dimensions || type == AST_MEMORY) {
 				newNode->dimensions.clear();
 				newNode->unpacked_dimensions = 0;
+				newNode->basic_prep = false;
+				newNode->range_valid = false;
 			}
 
 			goto apply_newNode;

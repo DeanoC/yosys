@@ -63,6 +63,7 @@ module top (
 
 	typedef logic [2:0][3:0] arr3x4_t;
 	typedef logic signed [2:0][3:0] sarr3x4_t;
+	typedef sarr3x4_t [1:0] spair_t;
 	typedef logic [1:0][2:0][3:0] arr2x3x4_t;
 	localparam arr3x4_t ROW_LP = 12'h123;
 	localparam sarr3x4_t SROW_LP = 12'h123;
@@ -74,6 +75,9 @@ module top (
 	localparam arr2x3x4_t P_CONST_TERN = '{default: 1'b1 ? ROW_LP : P_ARR};
 	parameter arr3x4_t PARAM_ARR = '{default: 4'h3};
 	arr3x4_t c_cast;
+	spair_t c_spair_srow;
+	spair_t c_spair_urow;
+	sarr3x4_t [1:0] c_direct_spair;
 
 	function automatic arr3x4_t make_row();
 		return 12'h123;
@@ -160,6 +164,9 @@ module top (
 		c3d_mixed_tern  = '{default: i[0] ? row : srow_abc};
 		sc3d_row        = '{default: row};
 		sc3d_srow       = '{default: srow};
+		c_spair_srow    = '{default: srow};
+		c_spair_urow    = '{default: row};
+		c_direct_spair  = '{default: srow};
 		c2d_bit_def  = '{default: 1'b1};
 		c2d_idx_bit_def = '{0: 4'hA, default: 1'b1};
 		c3d_bit_def  = '{default: 1'b1};
@@ -222,6 +229,9 @@ module top (
 	always_comb assert(c3d_mixed_tern === (i[0] ? 24'h333333 : 24'hCCCCCC));
 	always_comb assert(sc3d_row == 24'h123123);
 	always_comb assert(sc3d_srow == 24'h333333);
+	always_comb assert(c_spair_srow == 24'h123123);
+	always_comb assert(c_spair_urow == 24'h333333);
+	always_comb assert(c_direct_spair == 24'h123123);
 	always_comb assert(c2d_bit_def == 8'h11);
 	always_comb assert(c2d_idx_bit_def == 8'h1A);
 	always_comb assert(c3d_bit_def == 24'h111111);
