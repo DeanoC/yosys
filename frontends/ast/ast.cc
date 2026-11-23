@@ -1162,7 +1162,7 @@ static bool param_has_no_default(const AstNode* param) {
 	log_assert(param->type == AST_PARAMETER);
 	log_assert(children.size() <= 2);
 	return children.empty() ||
-		(children.size() == 1 && children[0]->type == AST_RANGE);
+		(children.size() == 1 && (children[0]->type == AST_RANGE || children[0]->type == AST_MULTIRANGE));
 }
 
 static RTLIL::Module *process_module(RTLIL::Design *design, AstNode *ast, bool defer, std::unique_ptr<AstNode> original_ast = NULL, bool quiet = false)

@@ -2556,6 +2556,17 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			break;
 		if (type == AST_PREFIX && i >= 1)
 			break;
+		if (i == 0 && type == AST_FCALL && children[i]->type == AST_IDENTIFIER &&
+				(str == "\\$dimensions" || str == "\\$unpacked_dimensions" ||
+				 str == "\\$increment" || str == "\\$size" || str == "\\$bits" ||
+				 str == "\\$high" || str == "\\$low" || str == "\\$left" || str == "\\$right") &&
+				current_scope.count(children[i]->str)) {
+			AstNode *target = current_scope.at(children[i]->str);
+			if ((target->type == AST_PARAMETER || target->type == AST_LOCALPARAM) &&
+					(!target->dimensions.empty() ||
+					 (target->children.size() > 1 && target->children[1]->type == AST_MULTIRANGE)))
+				continue;
+		}
 		if (type == AST_DEFPARAM && i == 0)
 			flag_autowire = true;
 		if (type == AST_TERNARY && i > 0 && !unevaluated_tern_branch) {
@@ -4832,7 +4843,12 @@ skip_dynamic_range_lvalue_expansion:;
 						left = high = width - 1;
 						right = low = 0;
 						expr_dimensions = 1;
-					} else if (id_ast->type == AST_WIRE || id_ast->type == AST_MEMORY) {
+					} else if ((id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) &&
+							id_ast->children.size() > 1 && id_ast->children[1]->type == AST_MULTIRANGE) {
+						did_something = true;
+						goto replace_fcall_later;
+					} else if (id_ast->type == AST_WIRE || id_ast->type == AST_MEMORY ||
+							((id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) && !id_ast->dimensions.empty())) {
 						// Check for item in packed struct / union
 						AstNode *item_node = buf->get_struct_member();
 						bool from_struct_array_member = false;
@@ -4846,8 +4862,17 @@ skip_dynamic_range_lvalue_expansion:;
 						// The dimension of the original array expression is saved in the 'integer' field.
 						// For struct array member selects, buf->integer counts outer array indices
 						// (for memory access checks), not dimensions sliced off the member itself.
-						if (!from_struct_array_member)
-							dim += buf->integer;
+						if (!from_struct_array_member) {
+							if ((id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) &&
+									!buf->basic_prep && !buf->children.empty()) {
+								if (buf->children[0]->type == AST_MULTIRANGE)
+									dim += GetSize(buf->children[0]->children);
+								else if (buf->children[0]->type == AST_RANGE)
+									dim += 1;
+							} else {
+								dim += buf->integer;
+							}
+						}
 
 						int dims = GetSize(id_ast->dimensions);
 						// TODO: IEEE Std 1800-2017 20.7: "If the first argument to an array query function would cause $dimensions to return 0
