@@ -365,6 +365,20 @@ from SystemVerilog:
 - The ``assume``, ``restrict``, and ``cover`` statements from SystemVerilog are
   also supported. The same limitations as with the ``assert`` statement apply.
 
+- In module context, ``assert property``, ``assume property``,
+  ``cover property`` and ``restrict property`` also accept a small subset of
+  concurrent assertion syntax:
+  ``property ([<clocking event>] [disable iff (<expression>)] <property>);``
+
+  - the clocking event is ``@(posedge <signal>)``, ``@(negedge <signal>)``,
+    ``@(<signal>)`` or ``@<signal>`` (the last two trigger on both edges), or
+    several such events combined inside one ``@(...)`` with ``or`` or ``,``;
+    without a clocking event the property is checked combinationally
+  - overlapping implication ``<expression> |-> <property>`` is supported; a
+    chain such as ``a |-> b |-> c`` is treated as ``(a && b) |-> c``
+  - action blocks (``else <statement>``) are not supported and are rejected
+    with a syntax error instead of being silently dropped
+
 - The keywords ``always_comb``, ``always_ff`` and ``always_latch``, ``logic``
   and ``bit`` are supported.
 

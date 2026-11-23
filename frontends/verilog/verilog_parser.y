@@ -840,7 +840,7 @@
 %token TOK_SYNOPSYS_FULL_CASE TOK_SYNOPSYS_PARALLEL_CASE
 %token TOK_SUPPLY0 TOK_SUPPLY1 TOK_TO_SIGNED TOK_TO_UNSIGNED
 %token TOK_POS_INDEXED TOK_NEG_INDEXED TOK_PROPERTY TOK_ENUM TOK_TYPEDEF
-%token TOK_RAND TOK_CONST TOK_CHECKER TOK_ENDCHECKER TOK_EVENTUALLY
+%token TOK_RAND TOK_CONST TOK_CHECKER TOK_ENDCHECKER TOK_EVENTUALLY TOK_DISABLE TOK_IFF TOK_SVA_OVERLAP_IMPLIES
 %token TOK_INCREMENT TOK_DECREMENT TOK_UNIQUE TOK_UNIQUE0 TOK_PRIORITY
 %token TOK_STRUCT TOK_PACKED TOK_UNSIGNED TOK_INT TOK_BYTE TOK_SHORTINT TOK_LONGINT TOK_VOID TOK_UNION
 %token TOK_BIT_OR_ASSIGN TOK_BIT_AND_ASSIGN TOK_BIT_XOR_ASSIGN TOK_ADD_ASSIGN
@@ -888,11 +888,12 @@
 %type <ast_t> opt_enum_init enum_type struct_type enum_struct_type func_return_type typedef_base_type
 %type <boolean_t> opt_property always_comb_or_latch always_or_always_ff
 %type <boolean_t> opt_signedness_default_signed opt_signedness_default_unsigned
-%type <integer_t> integer_atom_type integer_vector_type
+%type <integer_t> integer_atom_type integer_vector_type sva_assert_kind
 %type <al_t> attr if_attr case_attr
 %type <ast_t> struct_union
 %type <ast_node_type_t> asgn_binop inc_or_dec_op
 %type <ast_t> genvar_identifier
+%type <ast_t> opt_sva_clocking_event sva_clocking_event sva_clock_events sva_clock_event opt_sva_disable_iff sva_property_expr
 
 %type <specify_target_ptr_t> specify_target
 %type <specify_triple_ptr_t> specify_triple specify_opt_triple
@@ -3083,59 +3084,160 @@ assert:
 			warn_at_loc(@3, "SystemVerilog does not allow \"restrict\" without \"property\".");
 	};
 
+sva_assert_kind:
+	TOK_ASSERT { $$ = 0; } |
+	TOK_ASSUME { $$ = 1; } |
+	TOK_COVER { $$ = 2; } |
+	TOK_RESTRICT { $$ = 3; };
+
+opt_sva_clocking_event:
+	sva_clocking_event {
+		$$ = std::move($1);
+	} |
+	%empty {
+		$$ = nullptr;
+	};
+
+sva_clocking_event:
+	TOK_AT TOK_LPAREN sva_clock_events TOK_RPAREN {
+		$$ = std::move($3);
+	} |
+	TOK_AT TOK_ID {
+		auto ev = std::make_unique<AstNode>(@$, AST_ALWAYS);
+		auto id_pos = std::make_unique<AstNode>(@2, AST_IDENTIFIER);
+		id_pos->str = *$2;
+		auto id_neg = id_pos->clone();
+		ev->children.push_back(std::make_unique<AstNode>(@$, AST_POSEDGE, std::move(id_pos)));
+		ev->children.push_back(std::make_unique<AstNode>(@$, AST_NEGEDGE, std::move(id_neg)));
+		$$ = std::move(ev);
+	};
+
+sva_clock_events:
+	sva_clock_event {
+		$$ = std::move($1);
+	} |
+	sva_clock_events TOK_OR sva_clock_event {
+		for (auto &c : $3->children)
+			$1->children.push_back(std::move(c));
+		$$ = std::move($1);
+	} |
+	sva_clock_events TOK_COMMA sva_clock_event {
+		for (auto &c : $3->children)
+			$1->children.push_back(std::move(c));
+		$$ = std::move($1);
+	};
+
+sva_clock_event:
+	TOK_POSEDGE expr {
+		auto edge = std::make_unique<AstNode>(@$, AST_POSEDGE, std::move($2));
+		SET_AST_NODE_LOC(edge.get(), @1, @1);
+		$$ = std::make_unique<AstNode>(@$, AST_ALWAYS, std::move(edge));
+	} |
+	TOK_NEGEDGE expr {
+		auto edge = std::make_unique<AstNode>(@$, AST_NEGEDGE, std::move($2));
+		SET_AST_NODE_LOC(edge.get(), @1, @1);
+		$$ = std::make_unique<AstNode>(@$, AST_ALWAYS, std::move(edge));
+	} |
+	expr {
+		auto ev = std::make_unique<AstNode>(@$, AST_ALWAYS);
+		auto neg_expr = $1->clone();
+		ev->children.push_back(std::make_unique<AstNode>(@$, AST_POSEDGE, std::move($1)));
+		ev->children.push_back(std::make_unique<AstNode>(@$, AST_NEGEDGE, std::move(neg_expr)));
+		$$ = std::move(ev);
+	};
+
+opt_sva_disable_iff:
+	TOK_DISABLE TOK_IFF TOK_LPAREN expr TOK_RPAREN {
+		$$ = std::move($4);
+	} |
+	%empty {
+		$$ = nullptr;
+	};
+
+sva_property_expr:
+	expr {
+		$$ = std::make_unique<AstNode>(@$, AST_NONE, std::move($1));
+		$$->integer = 0;
+	} |
+	expr TOK_SVA_OVERLAP_IMPLIES sva_property_expr {
+		if ($3->integer != 0)
+			err_at_loc(@2, "Implication into `eventually' property is not supported.");
+		if ($3->children.size() == 2) {
+			$3->children[1] = std::make_unique<AstNode>(@$, AST_LOGIC_AND, std::move($1), std::move($3->children[1]));
+		} else {
+			$3->children.push_back(std::move($1));
+		}
+		$$ = std::move($3);
+	} |
+	TOK_EVENTUALLY expr {
+		$$ = std::make_unique<AstNode>(@$, AST_NONE, std::move($2));
+		$$->integer = 1;
+	};
+
+// Action blocks ("else <statement>") are deliberately not accepted: there is no
+// lowering for them, and parsing then discarding the statement would silently
+// drop user code. An "else" after the closing parenthesis is a syntax error.
 assert_property:
-	opt_sva_label TOK_ASSERT TOK_PROPERTY TOK_LPAREN expr TOK_RPAREN TOK_SEMICOL {
-		AstNode* node = extra->saveChild(std::make_unique<AstNode>(@$, mode->assume_asserts ? AST_ASSUME : AST_ASSERT, std::move($5)));
-		SET_AST_NODE_LOC(node, @1, @6);
-		if ($1 != nullptr) {
-			extra->ast_stack.back()->children.back()->str = *$1;
-		}
-	} |
-	opt_sva_label TOK_ASSUME TOK_PROPERTY TOK_LPAREN expr TOK_RPAREN TOK_SEMICOL {
-		AstNode* node = extra->saveChild(std::make_unique<AstNode>(@$, AST_ASSUME, std::move($5)));
-		SET_AST_NODE_LOC(node, @1, @6);
-		if ($1 != nullptr) {
-			extra->ast_stack.back()->children.back()->str = *$1;
-		}
-	} |
-	opt_sva_label TOK_ASSERT TOK_PROPERTY TOK_LPAREN TOK_EVENTUALLY expr TOK_RPAREN TOK_SEMICOL {
-		AstNode* node = extra->saveChild(std::make_unique<AstNode>(@$, mode->assume_asserts ? AST_FAIR : AST_LIVE, std::move($6)));
-		SET_AST_NODE_LOC(node, @1, @7);
-		if ($1 != nullptr) {
-			extra->ast_stack.back()->children.back()->str = *$1;
-		}
-	} |
-	opt_sva_label TOK_ASSUME TOK_PROPERTY TOK_LPAREN TOK_EVENTUALLY expr TOK_RPAREN TOK_SEMICOL {
-		AstNode* node = extra->saveChild(std::make_unique<AstNode>(@$, AST_FAIR, std::move($6)));
-		SET_AST_NODE_LOC(node, @1, @7);
-		if ($1 != nullptr) {
-			extra->ast_stack.back()->children.back()->str = *$1;
-		}
-	} |
-	opt_sva_label TOK_COVER TOK_PROPERTY TOK_LPAREN expr TOK_RPAREN TOK_SEMICOL {
-		AstNode* node = extra->saveChild(std::make_unique<AstNode>(@$, AST_COVER, std::move($5)));
-		SET_AST_NODE_LOC(node, @1, @6);
-		if ($1 != nullptr) {
-			extra->ast_stack.back()->children.back()->str = *$1;
-		}
-	} |
-	opt_sva_label TOK_RESTRICT TOK_PROPERTY TOK_LPAREN expr TOK_RPAREN TOK_SEMICOL {
-		if (mode->norestrict) {
-		} else {
-			AstNode* node = extra->saveChild(std::make_unique<AstNode>(@$, AST_ASSUME, std::move($5)));
-			SET_AST_NODE_LOC(node, @1, @6);
-			if ($1 != nullptr) {
-				extra->ast_stack.back()->children.back()->str = *$1;
+	opt_sva_label sva_assert_kind TOK_PROPERTY TOK_LPAREN opt_sva_clocking_event opt_sva_disable_iff sva_property_expr TOK_RPAREN TOK_SEMICOL {
+		bool is_eventually = ($7->integer != 0);
+		if ($2 == 2 && is_eventually)
+			err_at_loc(@7, "`eventually' is not supported in `cover property'.");
+		bool skip = ($2 == 0 && mode->noassert) || ($2 == 1 && mode->noassume) || ($2 == 3 && mode->norestrict);
+		if (!skip) {
+			AstNodeType ast_type = AST_ASSERT;
+			if ($2 == 0)
+				ast_type = is_eventually ? (mode->assume_asserts ? AST_FAIR : AST_LIVE) : (mode->assume_asserts ? AST_ASSUME : AST_ASSERT);
+			else if ($2 == 1)
+				ast_type = is_eventually ? (mode->assert_assumes ? AST_LIVE : AST_FAIR) : (mode->assert_assumes ? AST_ASSERT : AST_ASSUME);
+			else if ($2 == 2)
+				ast_type = AST_COVER;
+			else
+				ast_type = is_eventually ? AST_FAIR : AST_ASSUME;
+
+			auto consequent = std::move($7->children[0]);
+			std::unique_ptr<AstNode> en_cond;
+			if ($6 != nullptr)
+				en_cond = std::make_unique<AstNode>(@6, AST_LOGIC_NOT, std::move($6));
+			if ($7->children.size() > 1) {
+				auto antecedent = std::move($7->children[1]);
+				if (en_cond)
+					en_cond = std::make_unique<AstNode>(@$, AST_LOGIC_AND, std::move(en_cond), std::move(antecedent));
+				else
+					en_cond = std::move(antecedent);
 			}
-		}
-	} |
-	opt_sva_label TOK_RESTRICT TOK_PROPERTY TOK_LPAREN TOK_EVENTUALLY expr TOK_RPAREN TOK_SEMICOL {
-		if (mode->norestrict) {
-		} else {
-			AstNode* node = extra->saveChild(std::make_unique<AstNode>(@$, AST_FAIR, std::move($6)));
-			SET_AST_NODE_LOC(node, @1, @7);
-			if ($1 != nullptr) {
-				extra->ast_stack.back()->children.back()->str = *$1;
+
+			auto start_loc = ($1 != nullptr ? @1 : @2);
+			if ($5 != nullptr) {
+				auto check_node = std::make_unique<AstNode>(@$, ast_type, std::move(consequent));
+				SET_AST_NODE_LOC(check_node.get(), start_loc, @8);
+				if ($1 != nullptr)
+					check_node->str = *$1;
+				std::unique_ptr<AstNode> body;
+				if (en_cond) {
+					auto inner_block = std::make_unique<AstNode>(@$, AST_BLOCK, std::move(check_node));
+					auto cond = std::make_unique<AstNode>(@$, AST_COND, AstNode::mkconst_int(@$, 1, false, 1), std::move(inner_block));
+					auto en_bool = std::make_unique<AstNode>(@$, AST_REDUCE_BOOL, std::move(en_cond));
+					auto if_case = std::make_unique<AstNode>(@$, AST_CASE, std::move(en_bool), std::move(cond));
+					body = std::make_unique<AstNode>(@$, AST_BLOCK, std::move(if_case));
+				} else {
+					body = std::make_unique<AstNode>(@$, AST_BLOCK, std::move(check_node));
+				}
+				$5->children.push_back(std::move(body));
+				SET_AST_NODE_LOC($5.get(), start_loc, @8);
+				extra->saveChild(std::move($5));
+			} else {
+				if (en_cond) {
+					if (is_eventually)
+						err_at_loc(@6, "Unclocked `disable iff' with `eventually' is not supported.");
+					if (ast_type == AST_COVER)
+						consequent = std::make_unique<AstNode>(@$, AST_LOGIC_AND, std::move(en_cond), std::move(consequent));
+					else
+						consequent = std::make_unique<AstNode>(@$, AST_LOGIC_OR, std::make_unique<AstNode>(@$, AST_LOGIC_NOT, std::move(en_cond)), std::move(consequent));
+				}
+				AstNode *node = extra->saveChild(std::make_unique<AstNode>(@$, ast_type, std::move(consequent)));
+				SET_AST_NODE_LOC(node, start_loc, @8);
+				if ($1 != nullptr)
+					node->str = *$1;
 			}
 		}
 	};
