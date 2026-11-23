@@ -2966,8 +2966,15 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			// Pretend it's just a wire in order to resolve the type.
 			type = AST_WIRE;
 			while (is_custom_type && simplify(const_fold, stage, width_hint, sign_hint)) {};
-			if (type == AST_WIRE)
+			if (type == AST_WIRE) {
+				if (!children.empty()) {
+					if (GetSize(dimensions) > 1 && unpacked_dimensions == 0 && children[0]->type == AST_RANGE)
+						children[0] = make_dims_multirange(location, dimensions, is_signed);
+					dimensions.clear();
+					unpacked_dimensions = 0;
+				}
 				type = AST_STRUCT_ITEM;
+			}
 
 			did_something = true;
 		}
