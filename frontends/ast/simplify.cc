@@ -4896,7 +4896,9 @@ skip_dynamic_range_lvalue_expansion:;
 									if (param_last_sel->range_swapped)
 										std::swap(left, right);
 								} else {
-									int sel_width = range_width(id_ast, param_last_sel);
+									int sel_width = 1;
+									if (!try_determine_range_width(param_last_sel, sel_width))
+										input_error("Unsupported expression on dynamic range select on parameter `%s'!\n", id_ast->str);
 									right = low = 0;
 									left = high = sel_width - 1;
 								}

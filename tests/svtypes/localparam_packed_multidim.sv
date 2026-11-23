@@ -112,4 +112,6 @@ module top #(
 	always_comb assert($bits(T[a][b]) == 1);
 	always_comb assert(B_SL == 8 && S_SL1 == 2 && S_SL2 == 4 && D_SL == 2);
 	always_comb assert(B_PS == 2);
+	always_comb assert($bits(T[a +: 2]) == 8 && $size(T[a +: 2], 1) == 2 && $size(T[a +: 2], 2) == 4 && $dimensions(T[a +: 2]) == 2);
+	always_comb assert($bits(T[a -: 2]) == 8 && $bits(T[a][b +: 2]) == 2);
 endmodule
