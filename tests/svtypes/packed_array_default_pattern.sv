@@ -24,6 +24,12 @@ module top (
 	logic [0:2][3:0]       c_upto;
 	logic [7:0]            c1d;
 	logic [1:0][2:0][3:0]  c_sub;
+	logic [2:0][3:0]       row;
+	logic [2:0][3:0]       other_row;
+	logic [1:0][2:0][3:0]  c3d_row;
+	logic [1:0][2:0][3:0]  c3d_idx_row;
+	logic [1:0][2:0][3:0]  c3d_idx_leaf;
+	logic [1:0][1:0][2:0][3:0] c4d_row;
 
 	typedef logic [2:0][3:0] arr3x4_t;
 	arr3x4_t c_cast;
@@ -35,16 +41,22 @@ module top (
 	wrap_t c_struct;
 
 	always_comb begin
-		c2d        = '{default: 4'd5};
-		c3d        = '{default: 4'hA};
-		c3d_nested = '{default: '{default: 4'hC}};
-		c_idx      = '{0: 4'h1, 2: 4'h3, default: 4'h5};
-		c_upto     = '{0: 4'h1, 2: 4'h3, default: 4'h5};
-		c1d        = '{default: 1'b1};
-		c_sub      = '{default: 4'h0};
-		c_sub[1]   = '{default: 4'h7};
-		c_cast     = arr3x4_t'('{default: 4'h9});
-		c_struct   = '{arr: '{default: 4'h6}, en: 1'b1};
+		row          = 12'h123;
+		other_row    = 12'hABC;
+		c2d          = '{default: 4'd5};
+		c3d          = '{default: 4'hA};
+		c3d_nested   = '{default: '{default: 4'hC}};
+		c_idx        = '{0: 4'h1, 2: 4'h3, default: 4'h5};
+		c_upto       = '{0: 4'h1, 2: 4'h3, default: 4'h5};
+		c1d          = '{default: 1'b1};
+		c_sub        = '{default: 4'h0};
+		c_sub[1]     = '{default: 4'h7};
+		c_cast       = arr3x4_t'('{default: 4'h9});
+		c_struct     = '{arr: '{default: 4'h6}, en: 1'b1};
+		c3d_row      = '{default: row};
+		c3d_idx_row  = '{0: other_row, default: row};
+		c3d_idx_leaf = '{0: other_row, default: 4'h5};
+		c4d_row      = '{default: row};
 	end
 
 	always_comb assert(c2d == {4'd5, 4'd5, 4'd5});
@@ -56,4 +68,8 @@ module top (
 	always_comb assert(c_sub[1] == {3{4'h7}} && c_sub[0] == 12'h000);
 	always_comb assert(c_cast == {3{4'h9}});
 	always_comb assert(c_struct.arr == {3{4'h6}} && c_struct.en == 1'b1);
+	always_comb assert(c3d_row == {12'h123, 12'h123});
+	always_comb assert(c3d_idx_row == {12'h123, 12'hABC});
+	always_comb assert(c3d_idx_leaf == {12'h555, 12'hABC});
+	always_comb assert(c4d_row == {4{12'h123}});
 endmodule

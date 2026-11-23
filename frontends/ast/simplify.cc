@@ -1570,6 +1570,39 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 	if (has_positional && (has_index || default_elem))
 		pattern->input_error("Assignment pattern mixes positional and keyed elements\n");
 
+	auto matching_subarray_default = [&](AstNode *val, int start_dim) -> std::unique_ptr<AstNode> {
+		auto val_dims = packed_dims_for_lhs(val);
+		if (GetSize(val_dims) >= 2) {
+			int search_begin = std::max(start_dim, dim_idx + 1);
+			for (int d = search_begin; d < GetSize(dims); d++) {
+				int sub_len = GetSize(dims) - d;
+				if (GetSize(val_dims) != sub_len)
+					continue;
+				bool match = true;
+				for (int k = 0; k < sub_len; k++) {
+					if (val_dims[k].range_width != dims[d + k].range_width) {
+						match = false;
+						break;
+					}
+				}
+				if (match) {
+					int rep_count = 1;
+					for (int k = start_dim; k < d; k++)
+						rep_count *= dims[k].range_width;
+					int sub_width = 1;
+					for (int k = d; k < GetSize(dims); k++)
+						sub_width *= dims[k].range_width;
+					auto casted = cast_to_width(loc, sub_width, val->clone());
+					if (rep_count == 1)
+						return casted;
+					return std::make_unique<AstNode>(loc, AST_REPLICATE,
+							AstNode::mkconst_int(loc, rep_count, false), std::move(casted));
+				}
+			}
+		}
+		return nullptr;
+	};
+
 	// Default-only pattern: '{default: val}
 	if (default_elem && !has_index) {
 		auto val = strip_pattern_attrs(default_elem);
@@ -1579,6 +1612,8 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 			auto sub = elaborate_packed_array_pattern(val.get(), dims, dim_idx + 1);
 			return std::make_unique<AstNode>(loc, AST_REPLICATE, AstNode::mkconst_int(loc, count, false), std::move(sub));
 		}
+		if (auto sub_rep = matching_subarray_default(val.get(), dim_idx))
+			return sub_rep;
 		int leaf_width = (rem_dims >= 2) ? dims.back().range_width : 1;
 		int leaf_count = (rem_dims >= 2) ? 1 : count;
 		if (rem_dims >= 2) {
@@ -1622,8 +1657,13 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 			if (!elem)
 				pattern->input_error("Indexed assignment pattern does not specify every array element\n");
 			if (!slots[s] && default_elem && default_elem->type != AST_ASSIGN_PATTERN && rem_dims >= 3) {
-				auto sub_pat = std::make_unique<AstNode>(loc, AST_ASSIGN_PATTERN, default_elem->clone());
-				concat->children.push_back(elaborate_packed_array_pattern(sub_pat.get(), dims, dim_idx + 1));
+				auto val = strip_pattern_attrs(default_elem);
+				if (auto sub_rep = matching_subarray_default(val.get(), dim_idx + 1)) {
+					concat->children.push_back(std::move(sub_rep));
+				} else {
+					auto sub_pat = std::make_unique<AstNode>(loc, AST_ASSIGN_PATTERN, default_elem->clone());
+					concat->children.push_back(elaborate_packed_array_pattern(sub_pat.get(), dims, dim_idx + 1));
+				}
 			} else {
 				concat->children.push_back(elaborate_elem(elem));
 			}
