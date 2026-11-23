@@ -1617,9 +1617,16 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs, bool 
 	if (lhs->type == AST_SELFSZ && lhs->children.size() == 1)
 		return packed_dims_for_lhs(lhs->children[0].get(), out_signed, out_signed_sub_len);
 
-	if (lhs->type == AST_TO_SIGNED && lhs->children.size() == 1 &&
-			lhs->children[0]->type == AST_IDENTIFIER && lhs->children[0]->get_struct_member())
-		return packed_dims_for_lhs(lhs->children[0].get(), out_signed, out_signed_sub_len);
+	if ((lhs->type == AST_TO_SIGNED || lhs->type == AST_TO_UNSIGNED) && lhs->children.size() == 1) {
+		auto dims = packed_dims_for_lhs(lhs->children[0].get(), out_signed, out_signed_sub_len);
+		if (!dims.empty() && out_signed) {
+			bool sliced_struct_member = (lhs->type == AST_TO_SIGNED && lhs->children[0]->type == AST_IDENTIFIER &&
+					lhs->children[0]->get_struct_member() && lhs->children[0]->integer > 0);
+			if (!sliced_struct_member)
+				*out_signed = (lhs->type == AST_TO_SIGNED);
+		}
+		return dims;
+	}
 
 	if (lhs->type == AST_TERNARY && lhs->children.size() == 3) {
 		bool t_signed = false, f_signed = false;
@@ -5943,6 +5950,12 @@ replace_fcall_later:;
 			if (children[0]->type == AST_CONSTANT) {
 				RTLIL::Const y = children[0]->bitsAsConst(width_hint, sign_hint);
 				newNode = mkconst_bits(location, y.to_bits(), type == AST_TO_SIGNED);
+				auto cast_it = children[0]->attributes.find(cast_type_dims_attr());
+				if (cast_it != children[0]->attributes.end()) {
+					auto dims_attr = cast_it->second->clone();
+					dims_attr->is_signed = (type == AST_TO_SIGNED);
+					newNode->set_attribute(cast_type_dims_attr(), std::move(dims_attr));
+				}
 			}
 			break;
 		if (0) { case AST_BIT_AND:  const_func = RTLIL::const_and;  }
@@ -6092,6 +6105,10 @@ replace_fcall_later:;
 								newNode = mkconst_str(location, y.to_bits());
 							else
 								newNode = mkconst_bits(location, y.to_bits(), sign_hint);
+							bool tern_signed = false;
+							auto tern_dims = packed_dims_for_lhs(this, &tern_signed);
+							if (GetSize(tern_dims) > 1)
+								newNode->set_attribute(cast_type_dims_attr(), make_dims_multirange(location, tern_dims, tern_signed));
 						}
 					} else
 					if (choice->isConst()) {
@@ -6105,6 +6122,10 @@ replace_fcall_later:;
 						if (a[i] != b[i])
 							a.set(i, RTLIL::State::Sx);
 					newNode = mkconst_bits(location, a.to_bits(), sign_hint);
+					bool tern_signed = false;
+					auto tern_dims = packed_dims_for_lhs(this, &tern_signed);
+					if (GetSize(tern_dims) > 1)
+						newNode->set_attribute(cast_type_dims_attr(), make_dims_multirange(location, tern_dims, tern_signed));
 				} else if (children[1]->isConst() && children[2]->isConst()) {
 					newNode = std::make_unique<AstNode>(location, AST_REALVALUE);
 					if (children[1]->asReal(sign_hint) == children[2]->asReal(sign_hint))

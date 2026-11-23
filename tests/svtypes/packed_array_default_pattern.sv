@@ -70,6 +70,8 @@ module top (
 	localparam arr3x4_t P_ARR_IDX = '{0: 4'h1, default: 4'h5};
 	localparam logic [7:0] P_VEC = '{default: 1'b1};
 	localparam arr2x3x4_t P_3D_SUB = '{default: P_ARR};
+	localparam arr2x3x4_t P_UNSIGNED_LP = '{default: unsigned'(SROW_LP)};
+	localparam arr2x3x4_t P_CONST_TERN = '{default: 1'b1 ? ROW_LP : P_ARR};
 	parameter arr3x4_t PARAM_ARR = '{default: 4'h3};
 	arr3x4_t c_cast;
 
@@ -96,6 +98,8 @@ module top (
 	swrap_t c_swrap_sub;
 	swrap_t c_swrap_123;
 	logic [1:0][2:0][3:0] c3d_swrap_sarr;
+	logic [1:0][2:0][3:0] c3d_unsigned_srow;
+	logic [1:0][2:0][3:0] c3d_signed_row_cast;
 
 	always_comb begin
 		row          = 12'h123;
@@ -122,6 +126,8 @@ module top (
 		c_swrap_sub.sarr[1][2:1] = '{default: 1'b1};
 		c_swrap_123  = '{sarr: 12'h123, en: 1'b1};
 		c3d_swrap_sarr = '{default: c_swrap_123.sarr};
+		c3d_unsigned_srow   = '{default: unsigned'(srow)};
+		c3d_signed_row_cast = '{default: signed'(row)};
 		c3d_row      = '{default: row};
 		c3d_idx_row  = '{0: other_row, default: row};
 		c3d_idx_leaf = '{0: other_row, default: 4'h5};
@@ -173,6 +179,8 @@ module top (
 	always_comb assert(c_swrap.sarr == 12'shAAA && c_swrap.en == 1'b0);
 	always_comb assert(c_swrap_sub.sarr == 12'sh060 && c_swrap_sub.en == 1'b0);
 	always_comb assert(c3d_swrap_sarr == 24'h333333);
+	always_comb assert(c3d_unsigned_srow == 24'h123123);
+	always_comb assert(c3d_signed_row_cast == 24'h333333);
 	always_comb assert(c3d_row == {12'h123, 12'h123});
 	always_comb assert(c3d_idx_row == {12'h123, 12'hABC});
 	always_comb assert(c3d_idx_leaf == {12'h555, 12'hABC});
@@ -188,6 +196,8 @@ module top (
 	always_comb assert(P_ARR_IDX == 12'h551);
 	always_comb assert(P_VEC == 8'hFF);
 	always_comb assert(P_3D_SUB == 24'hAAAAAA);
+	always_comb assert(P_UNSIGNED_LP == 24'h123123);
+	always_comb assert(P_CONST_TERN == 24'h123123);
 	always_comb assert(PARAM_ARR == 12'h333);
 	always_comb assert(P_WRAP == {12'h666, 1'b1});
 	always_comb assert(c3d_p_arr == 24'hAAAAAA);
