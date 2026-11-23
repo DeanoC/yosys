@@ -3492,6 +3492,12 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 				newNode->unpacked_dimensions = 0;
 				newNode->basic_prep = false;
 				newNode->range_valid = false;
+			} else if (newNode->type == AST_STRUCT || newNode->type == AST_UNION) {
+				// A struct/union clone (e.g. a typedef'd struct member) must not keep the
+				// template's {0, width} entry: size_packed_struct() appends a fresh one when
+				// the enclosing struct is sized, which would otherwise double the dimension.
+				newNode->dimensions.clear();
+				newNode->unpacked_dimensions = 0;
 			}
 
 			goto apply_newNode;

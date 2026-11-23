@@ -36,6 +36,8 @@ always_comb begin
 	assert ($dimensions(s.sz.z) == 3);
 	assert ($dimensions(s.sz.z[3]) == 2);
 	assert ($dimensions(s.sz.z[3][3]) == 1);
+	// A typedef'd struct member is a single packed dimension of its full width.
+	assert ($dimensions(s.sy) == 1);
 
 	assert ($size(s) == $size(s.t) + $size(s.x) + $size(s.sy) + $size(s.sz));
 	assert ($size(s) == 1 + 4 + 6*4 + 6*8*4);
@@ -65,6 +67,7 @@ always_comb begin
 
 	assert ($bits(s.t) == 1);
 	assert ($bits(s.x) == 4);
+	assert ($bits(s.sy) == 4*6);
 	assert ($bits(s.sy.y) == 4*6);
 	assert ($bits(s.sz.z) == 4*6*8);
 
