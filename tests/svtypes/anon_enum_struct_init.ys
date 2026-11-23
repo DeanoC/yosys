@@ -1,0 +1,4 @@
+read_verilog -sv anon_enum_struct_init.sv
+prep -top top
+check -assert
+sat -seq 3 -set-init-undef -verify -prove o o_ref -prove o_enum o_enum_ref -prove o_struct_pat o_struct_pat_ref -prove o_union o_union_ref
