@@ -86,8 +86,11 @@ read_verilog -sv <<EOT
 module top (
 	input logic [1:0] a
 );
-	localparam logic [3:0][3:0] T = 16'h1234;
-	localparam logic [3:0][2:0][7:0] M = 96'h0;
+	localparam logic [3:0][3:0] T = {4'hA, 4'hB, 4'hC, 4'hD};
+	localparam logic [0:3][3:0] T_UP = {4'hA, 4'hB, 4'hC, 4'hD};
+	localparam logic [3:0][2:0][7:0] M = {
+		24'h112233, 24'h445566, 24'h778899, 24'hAABBCC
+	};
 
 	localparam int B_TT = $bits(T[2:1][2:1]);
 	localparam int D_TT = $dimensions(T[2:1][2:1]);
@@ -101,10 +104,21 @@ module top (
 	localparam int D_M3 = $dimensions(M[2:1][0][5:2]);
 	localparam int B_M2 = $bits(M[2:1][0]);
 	localparam int D_M2 = $dimensions(M[2:1][0]);
+	localparam logic [3:0] P_TT = T[2:1][2:1];
+	localparam logic [1:0] P_TI = T[2:1][0];
+	localparam logic [3:0] P_UP = T_UP[1:2][2:1];
+	localparam logic [7:0] P_M3 = M[2:1][0][5:2];
+	localparam logic [15:0] P_M3_2 = M[2:1][1:0][5:2];
 
 	always_comb assert(B_TT == 4 && D_TT == 2 && L1_TT == 2 && R1_TT == 1 && L2_TT == 2 && R2_TT == 1);
 	always_comb assert(B_TI == 2 && D_TI == 1);
 	always_comb assert(B_M3 == 8 && D_M3 == 2 && B_M2 == 16 && D_M2 == 2);
+	always_comb assert(P_TT == 4'b0110 && P_TI == 2'b10 && P_UP == 4'b0110);
+	always_comb assert(P_M3 == {M[2][0][5:2], M[1][0][5:2]});
+	always_comb assert(P_M3_2 == {M[2][1][5:2], M[2][0][5:2], M[1][1][5:2], M[1][0][5:2]});
+	always_comb assert({T[2:1][2:1]} == 4'b0110 && {T[2:1][0]} == 2'b10);
+	always_comb assert({T_UP[1:2][2:1]} == 4'b0110);
+	always_comb if (a <= 2'd2) assert(T[a +: 2][2:1] == {T[a + 2'd1][2:1], T[a][2:1]});
 	always_comb assert($bits(T[2:1][2:1]) == 4 && $dimensions(T[2:1][2:1]) == 2);
 	always_comb assert($size(T[2:1][2:1], 1) == 2 && $size(T[2:1][2:1], 2) == 2);
 	always_comb assert($bits(T[2:1][0]) == 2 && $dimensions(T[2:1][0]) == 1);

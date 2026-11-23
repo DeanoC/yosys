@@ -3201,6 +3201,79 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			}
 		}
 
+		// A non-final packed part-select on a parameter (e.g. T[2:1][0] or
+		// T[2:1][2:1]) selects non-contiguous elements that cannot be represented
+		// by a single flattened AST_RANGE from make_index_range(). Expand the
+		// first non-final packed part-select into an AST_CONCAT of per-element
+		// selects so both the value width and slice metadata are preserved.
+		if ((id2ast->type == AST_PARAMETER || id2ast->type == AST_LOCALPARAM) &&
+				children[0]->type == AST_MULTIRANGE && dims_sel <= total_decl_dims) {
+			int split_k = -1;
+			for (int k = id2ast->unpacked_dimensions; k < dims_sel - 1; k++) {
+				AstNode *sel = children[0]->children[k].get();
+				if (sel->type == AST_RANGE && sel->children.size() == 2) {
+					split_k = k;
+					break;
+				}
+			}
+			if (split_k >= 0) {
+				AstNode *sel = children[0]->children[split_k].get();
+				std::vector<std::unique_ptr<AstNode>> elem_indices;
+				if (sel->range_valid) {
+					int w = sel->range_left - sel->range_right + 1;
+					for (int i = 0; i < w; i++) {
+						int idx_val = sel->range_swapped ? (sel->range_left - i) : (sel->range_right + i);
+						elem_indices.push_back(mkconst_int(sel->location, idx_val, true));
+					}
+				} else {
+					auto left_z = sel->children[0]->clone_at_zero();
+					auto right_z = sel->children[1]->clone_at_zero();
+					while (left_z->simplify(true, 1, -1, false)) {}
+					while (right_z->simplify(true, 1, -1, false)) {}
+					if (left_z->type == AST_CONSTANT && right_z->type == AST_CONSTANT) {
+						int diff = int(left_z->integer) - int(right_z->integer);
+						int w = abs(diff) + 1;
+						bool ascending = id2ast->dimensions[split_k].range_swapped;
+						if (ascending) {
+							for (int i = 0; i < w; i++) {
+								if (i == 0)
+									elem_indices.push_back(sel->children[0]->clone());
+								else
+									elem_indices.push_back(std::make_unique<AstNode>(sel->location,
+											diff >= 0 ? AST_SUB : AST_ADD,
+											sel->children[0]->clone(), mkconst_int(sel->location, i, false)));
+							}
+						} else {
+							for (int i = 0; i < w; i++) {
+								if (i == 0)
+									elem_indices.push_back(sel->children[1]->clone());
+								else
+									elem_indices.push_back(std::make_unique<AstNode>(sel->location,
+											diff >= 0 ? AST_ADD : AST_SUB,
+											sel->children[1]->clone(), mkconst_int(sel->location, i, false)));
+							}
+						}
+					}
+				}
+				if (!elem_indices.empty()) {
+					auto concat = std::make_unique<AstNode>(location, AST_CONCAT);
+					auto slice_it = attributes.find(packed_slice_dims_attr());
+					if (slice_it != attributes.end())
+						concat->set_attribute(packed_slice_dims_attr(), slice_it->second->clone());
+					for (auto &idx_expr : elem_indices) {
+						auto elem = clone();
+						elem->attributes.erase(packed_slice_dims_attr());
+						elem->integer = 0;
+						auto idx_range = std::make_unique<AstNode>(sel->location, AST_RANGE, std::move(idx_expr));
+						elem->children[0]->children[split_k] = std::move(idx_range);
+						concat->children.push_back(std::move(elem));
+					}
+					newNode = std::move(concat);
+					goto apply_newNode;
+				}
+			}
+		}
+
 		// Split access into unpacked and packed parts.
 		std::unique_ptr<AstNode> unpacked_range = nullptr;
 		std::unique_ptr<AstNode> packed_range = nullptr;
@@ -5053,7 +5126,8 @@ skip_dynamic_range_lvalue_expansion:;
 					auto &sdims = slice_node->children;
 					int total_dims = GetSize(sdims);
 					if (req_dim < 1 || req_dim > total_dims)
-						input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", req_dim, target->str, total_dims);
+						input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n",
+								req_dim, target->str.empty() ? "expression" : target->str, total_dims);
 					std::vector<int> dim_widths(total_dims, 1);
 					int dyn_idx = -1;
 					int known_prod = 1;
@@ -5278,10 +5352,15 @@ skip_dynamic_range_lvalue_expansion:;
 							expr_dimensions = 1;
 						}
 					} else {
-						width = arg_width;
-						right = low  = 0;
-						left  = high = width - 1;
-						expr_dimensions = 1;
+						auto slice_it = buf->attributes.find(packed_slice_dims_attr());
+						if (slice_it != buf->attributes.end() && slice_it->second->type == AST_MULTIRANGE && !slice_it->second->children.empty()) {
+							eval_from_slice_dims(buf.get(), slice_it->second.get(), arg_width);
+						} else {
+							width = arg_width;
+							right = low  = 0;
+							left  = high = width - 1;
+							expr_dimensions = 1;
+						}
 					}
 				}
 				if (str == "\\$dimensions")
@@ -6087,6 +6166,8 @@ replace_fcall_later:;
 				tmp_bits.insert(tmp_bits.end(), (*it)->bits.begin(), (*it)->bits.end());
 			}
 			newNode = string_op ? mkconst_str(location, tmp_bits) : mkconst_bits(location, tmp_bits, false);
+			if (auto slice_it = attributes.find(packed_slice_dims_attr()); slice_it != attributes.end())
+				newNode->set_attribute(packed_slice_dims_attr(), slice_it->second->clone());
 			break;
 		case AST_REPLICATE:
 			if (children.at(0)->type != AST_CONSTANT || children.at(1)->type != AST_CONSTANT)
