@@ -1537,6 +1537,24 @@ static std::vector<AstNode::dimension_t> slice_packed_dims(const std::vector<Ast
 	return dims;
 }
 
+static std::unique_ptr<AstNode> make_dims_multirange(AstSrcLocType loc, const std::vector<AstNode::dimension_t> &dims)
+{
+	auto mr = std::make_unique<AstNode>(loc, AST_MULTIRANGE);
+	for (const auto &d : dims) {
+		int low_b = d.range_right;
+		int high_b = low_b + d.range_width - 1;
+		int l = d.range_swapped ? low_b : high_b;
+		int r = d.range_swapped ? high_b : low_b;
+		auto rn = make_range(loc, l, r);
+		rn->range_valid = true;
+		rn->range_left = high_b;
+		rn->range_right = low_b;
+		rn->range_swapped = d.range_swapped;
+		mr->children.push_back(std::move(rn));
+	}
+	return mr;
+}
+
 static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs)
 {
 	auto cast_it = lhs->attributes.find(cast_type_dims_attr());
@@ -1566,7 +1584,8 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs)
 	}
 
 	AstNode *decl = lhs->id2ast;
-	if (decl->type != AST_WIRE && decl->type != AST_MEMORY)
+	if (decl->type != AST_WIRE && decl->type != AST_MEMORY &&
+			decl->type != AST_PARAMETER && decl->type != AST_LOCALPARAM)
 		return {};
 	if (decl->dimensions.empty())
 		return {};
@@ -1671,6 +1690,39 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 		return nullptr;
 	};
 
+	auto elaborate_default_nonpattern = [&](std::unique_ptr<AstNode> val, int start_dim) -> std::unique_ptr<AstNode> {
+		if (auto sub_rep = matching_subarray_default(val.get(), start_dim))
+			return sub_rep;
+		int val_width = -1;
+		bool val_sign = true;
+		val->detectSignWidth(val_width, val_sign);
+		int total_bits = 1;
+		for (int d = start_dim; d < GetSize(dims); d++)
+			total_bits *= dims[d].range_width;
+		if (val_width == 1) {
+			if (total_bits == 1)
+				return cast_to_width(loc, 1, std::move(val));
+			return std::make_unique<AstNode>(loc, AST_REPLICATE,
+					AstNode::mkconst_int(loc, total_bits, false),
+					cast_to_width(loc, 1, std::move(val)));
+		}
+		int rem = GetSize(dims) - start_dim;
+		if (rem <= 0)
+			return cast_to_width(loc, 1, std::move(val));
+		if (rem == 1 && start_dim == dim_idx) {
+			return std::make_unique<AstNode>(loc, AST_REPLICATE,
+					AstNode::mkconst_int(loc, dims[start_dim].range_width, false),
+					cast_to_width(loc, 1, std::move(val)));
+		}
+		int leaf_width = dims.back().range_width;
+		int leaf_count = total_bits / leaf_width;
+		auto casted = cast_to_width(loc, leaf_width, std::move(val));
+		if (leaf_count == 1)
+			return casted;
+		return std::make_unique<AstNode>(loc, AST_REPLICATE,
+				AstNode::mkconst_int(loc, leaf_count, false), std::move(casted));
+	};
+
 	// Default-only pattern: '{default: val}
 	if (default_elem && !has_index) {
 		auto val = strip_pattern_attrs(default_elem);
@@ -1680,17 +1732,7 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 			auto sub = elaborate_packed_array_pattern(val.get(), dims, dim_idx + 1);
 			return std::make_unique<AstNode>(loc, AST_REPLICATE, AstNode::mkconst_int(loc, count, false), std::move(sub));
 		}
-		if (auto sub_rep = matching_subarray_default(val.get(), dim_idx))
-			return sub_rep;
-		int leaf_width = (rem_dims >= 2) ? dims.back().range_width : 1;
-		int leaf_count = (rem_dims >= 2) ? 1 : count;
-		if (rem_dims >= 2) {
-			for (int d = dim_idx; d < GetSize(dims) - 1; d++)
-				leaf_count *= dims[d].range_width;
-		}
-		return std::make_unique<AstNode>(loc, AST_REPLICATE,
-				AstNode::mkconst_int(loc, leaf_count, false),
-				cast_to_width(loc, leaf_width, std::move(val)));
+		return elaborate_default_nonpattern(std::move(val), dim_idx);
 	}
 
 	// Indexed pattern: '{0: a, 2: b, default: c}
@@ -1724,14 +1766,8 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 			AstNode *elem = slots[s] ? slots[s] : default_elem;
 			if (!elem)
 				pattern->input_error("Indexed assignment pattern does not specify every array element\n");
-			if (!slots[s] && default_elem && default_elem->type != AST_ASSIGN_PATTERN && rem_dims >= 3) {
-				auto val = strip_pattern_attrs(default_elem);
-				if (auto sub_rep = matching_subarray_default(val.get(), dim_idx + 1)) {
-					concat->children.push_back(std::move(sub_rep));
-				} else {
-					auto sub_pat = std::make_unique<AstNode>(loc, AST_ASSIGN_PATTERN, default_elem->clone());
-					concat->children.push_back(elaborate_packed_array_pattern(sub_pat.get(), dims, dim_idx + 1));
-				}
+			if (!slots[s] && default_elem && default_elem->type != AST_ASSIGN_PATTERN && rem_dims >= 2) {
+				concat->children.push_back(elaborate_default_nonpattern(strip_pattern_attrs(default_elem), dim_idx + 1));
 			} else {
 				concat->children.push_back(elaborate_elem(elem));
 			}
@@ -3095,9 +3131,12 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 				newNode->type = type;
 			}
 
-			// Prepare to generate dimensions metadata for the resolved type.
-			newNode->dimensions.clear();
-			newNode->unpacked_dimensions = 0;
+			// Prepare to generate dimensions metadata only when new dimensions were attached;
+			// otherwise preserve already-flattened multi-dimensional metadata from template_node.
+			if (add_packed_dimensions || type == AST_MEMORY) {
+				newNode->dimensions.clear();
+				newNode->unpacked_dimensions = 0;
+			}
 
 			goto apply_newNode;
 		}
@@ -5763,8 +5802,11 @@ replace_fcall_later:;
 						}
 						newNode = mkconst_bits(location, data, false);
 					} else
-					if (children.size() == 0)
+					if (children.size() == 0) {
 						newNode = current_scope[str]->children[0]->clone();
+						if (GetSize(current_scope[str]->dimensions) > 1 && current_scope[str]->unpacked_dimensions == 0)
+							newNode->set_attribute(cast_type_dims_attr(), make_dims_multirange(location, current_scope[str]->dimensions));
+					}
 				} else
 				if (current_scope[str]->children[0]->isConst())
 					newNode = current_scope[str]->children[0]->clone();
