@@ -1458,6 +1458,62 @@ static AstNode *struct_elem_type_for_decl(AstNode *decl)
 	return nullptr;
 }
 
+// Typedef'd struct members, typedef aliases (typedef pair_t alias_t) and the
+// wiretype copies on struct member references are clones of the declaring
+// struct/union. Clones of a typedef carry its name in their wiretype attribute;
+// follow those names to the template of the typedef that declares the type.
+static AstNode *canonical_struct_type(AstNode *stype)
+{
+	std::set<std::string> visited;
+	while (stype) {
+		auto it = stype->attributes.find(ID::wiretype);
+		if (it == stype->attributes.end() || !it->second)
+			break;
+		std::string tname = it->second->str;
+		if (tname.empty() && it->second->is_string)
+			tname = it->second->bitsAsConst().decode_string();
+		if (!tname.empty() && tname[0] != '\\')
+			tname = "\\" + tname;
+		if (tname.empty() || !visited.insert(tname).second || !current_scope.count(tname))
+			break;
+		AstNode *td = current_scope.at(tname);
+		if (td->type != AST_TYPEDEF || td->children.size() != 1)
+			break;
+		AstNode *tmpl = td->children[0].get();
+		if (tmpl->type != AST_STRUCT && tmpl->type != AST_UNION)
+			break;
+		stype = tmpl;
+	}
+	return stype;
+}
+
+static bool same_source_location(const AstNode *a, const AstNode *b)
+{
+	const auto &la = a->location, &lb = b->location;
+	if (!la.begin.filename || !lb.begin.filename || *la.begin.filename != *lb.begin.filename)
+		return false;
+	return la.begin.line == lb.begin.line && la.begin.column == lb.begin.column &&
+			la.end.line == lb.end.line && la.end.column == lb.end.column;
+}
+
+// Whether two struct/union type nodes denote the same type (IEEE 1800-2017
+// 6.22.1): the same typedef, possibly through aliases, or clones of the same
+// anonymous struct/union declaration. Type nodes are routinely cloned, so they
+// cannot be compared by pointer.
+static bool same_struct_type(AstNode *a, AstNode *b)
+{
+	if (a == b)
+		return true;
+	if (!a || !b)
+		return false;
+	a = canonical_struct_type(a);
+	b = canonical_struct_type(b);
+	if (a == b)
+		return true;
+	return a->type == b->type && a->is_signed == b->is_signed && same_source_location(a, b) &&
+			a->range_valid && b->range_valid && a->range_left - a->range_right == b->range_left - b->range_right;
+}
+
 static bool decl_is_array(AstNode *decl)
 {
 	if (!decl)
@@ -1555,7 +1611,7 @@ static AstNode *struct_type_for_expr(AstNode *expr)
 	if (expr->type == AST_TERNARY && expr->children.size() == 3) {
 		AstNode *t_st = struct_type_for_expr(expr->children[1].get());
 		AstNode *f_st = struct_type_for_expr(expr->children[2].get());
-		return (t_st && t_st == f_st) ? t_st : nullptr;
+		return (t_st && same_struct_type(t_st, f_st)) ? t_st : nullptr;
 	}
 	if (expr->type == AST_IDENTIFIER && expr->id2ast) {
 		if (AstNode *member = expr->get_struct_member()) {
@@ -1861,7 +1917,7 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs, bool 
 		AstNode *t_stype = nullptr, *f_stype = nullptr;
 		auto t_dims = packed_dims_for_lhs(lhs->children[1].get(), &t_signed, nullptr, &t_stype);
 		auto f_dims = packed_dims_for_lhs(lhs->children[2].get(), &f_signed, nullptr, &f_stype);
-		if (!t_dims.empty() && t_dims.size() == f_dims.size() && t_signed == f_signed && t_stype == f_stype) {
+		if (!t_dims.empty() && t_dims.size() == f_dims.size() && t_signed == f_signed && same_struct_type(t_stype, f_stype)) {
 			bool same = true;
 			for (size_t i = 0; i < t_dims.size(); i++) {
 				if (t_dims[i].range_right != f_dims[i].range_right ||
@@ -2060,7 +2116,7 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 		bool val_signed = false;
 		AstNode *val_elem_stype = nullptr;
 		auto val_dims = packed_dims_for_lhs(val, &val_signed, nullptr, &val_elem_stype);
-		if (GetSize(val_dims) >= 2 && val_elem_stype == elem_stype) {
+		if (GetSize(val_dims) >= 2 && same_struct_type(val_elem_stype, elem_stype)) {
 			int search_begin = std::max(start_dim, dim_idx + 1);
 			for (int d = search_begin; d < GetSize(dims); d++) {
 				int sub_len = GetSize(dims) - d;
@@ -2099,7 +2155,7 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 	auto elaborate_default_nonpattern = [&](std::unique_ptr<AstNode> val, int start_dim) -> std::unique_ptr<AstNode> {
 		if (auto sub_rep = matching_subarray_default(val.get(), start_dim))
 			return sub_rep;
-		if (elem_stype && elem_stype->type == AST_STRUCT && struct_type_for_expr(val.get()) != elem_stype) {
+		if (elem_stype && elem_stype->type == AST_STRUCT && !same_struct_type(struct_type_for_expr(val.get()), elem_stype)) {
 			auto synth_pat = std::make_unique<AstNode>(loc, AST_ASSIGN_PATTERN);
 			auto def_val = val->clone();
 			def_val->set_attribute(pattern_default_attr(), AstNode::mkconst_int(loc, 1, false));
@@ -2243,7 +2299,7 @@ static std::unique_ptr<AstNode> pattern_element_value(AstNode *elem, AstNode *me
 				elem->input_error("Positional assignment pattern is not supported for packed union member '%s'\n", member->str);
 			value = elaborate_positional_pattern(value.get(), sub);
 		}
-	} else if (is_default_elem && member->type == AST_STRUCT && struct_type_for_expr(value.get()) != member) {
+	} else if (is_default_elem && member->type == AST_STRUCT && !same_struct_type(struct_type_for_expr(value.get()), member)) {
 		// IEEE 1800-2017 10.9.2: an unmatched struct default recurses only into
 		// structure (or unpacked array) members. Every other member, including a
 		// multidimensional packed array, takes the default cast to its own type.
@@ -2414,6 +2470,16 @@ bool AstNode::resolve_cast_type(bool const_fold, int stage, int width_hint, bool
 
 		// Ensure typedef itself is fully simplified
 		while (template_node->simplify(const_fold, stage, width_hint, sign_hint)) {};
+
+		// A keyed operand pattern is elaborated against the cast type below, which
+		// can happen before the cast's children are simplified (from the switch in
+		// simplify() or from detectSignWidthWorker()). Resolve its element values
+		// first, as for an assignment pattern, so that defaults are matched against
+		// the type's packed subarrays and struct members.
+		if (GetSize(children) > 1 && children[1]->type == AST_ASSIGN_PATTERN &&
+				(assignment_pattern_is_named(children[1].get()) || assignment_pattern_has_index_key(children[1].get()))) {
+			while (!children[1]->basic_prep && children[1]->simplify(false, stage, -1, false)) { }
+		}
 
 		switch (template_node->type)
 		{

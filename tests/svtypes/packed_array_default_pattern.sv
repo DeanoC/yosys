@@ -154,6 +154,47 @@ module top (
 	logic [3:0][7:0]      c2d_2ps;
 	wrap_t                c_struct_2ps;
 
+	// Struct default type matching uses type identity, not AST node identity:
+	// typedef'd struct members, member references, typedef aliases and anonymous
+	// nested struct types take a matching struct default whole.
+	typedef struct packed {
+		pair8_t p0;
+		pair8_t p1;
+	} quad8_t;
+	typedef pair8_t alias8_t;
+	typedef struct packed {
+		struct packed {
+			logic [3:0] a;
+			logic [3:0] b;
+		} s;
+		logic t;
+	} anon_wrap_t;
+	localparam quad8_t P_QUAD_DEF = '{default: P_PAIR};
+	localparam quad8_t P_QUAD_CAST = quad8_t'('{default: P_PAIR});
+	localparam arr2x3x4_t P_CAST_ROW = arr2x3x4_t'('{default: ROW_LP});
+	pair8_t            pair_val;
+	pair8_t            pair_val2;
+	alias8_t           alias_val;
+	other8_t           other_val;
+	quad8_t            quad_src;
+	alias8_t [2:0]     alias_row;
+	anon_wrap_t        anon_src;
+	quad8_t            c_quad_def;
+	quad8_t            c_quad_mref;
+	quad8_t            c_quad_alias;
+	quad8_t            c_quad_tern;
+	quad8_t            c_quad_other;
+	pair8_t [1:0]      c_pair_mref_def;
+	pair8_t [1:0]      c_pair_alias_def;
+	pair8_t [1:0][2:0] c_pair_2d_alias_row;
+	anon_wrap_t        c_anon_def;
+	// Cast operands are resolved before the pattern is elaborated against the cast type.
+	arr2x3x4_t         c_cast_def_row;
+	arr2x3x4_t         c_cast_idx_row;
+	arr2x3x4_t         c_cast_expr_row;
+	quad8_t            c_quad_cast;
+	quad8_t            c_quad_cast_mref;
+
 	always_comb begin
 		row          = 12'h123;
 		other_row    = 12'hABC;
@@ -254,6 +295,27 @@ module top (
 		c2d_2ps[2:1][5:2] = '{default: 1'b1};
 		c_struct_2ps = '0;
 		c_struct_2ps.arr[2:1][2:1] = '{default: 1'b1};
+		pair_val     = 8'hA5;
+		pair_val2    = 8'h3C;
+		alias_val    = 8'h96;
+		other_val    = 8'h5A;
+		quad_src     = 16'h1234;
+		alias_row    = 24'h123456;
+		anon_src     = {8'hA5, 1'b0};
+		c_quad_def   = '{default: pair_val};
+		c_quad_mref  = '{default: quad_src.p1};
+		c_quad_alias = '{default: alias_val};
+		c_quad_tern  = '{default: i[0] ? pair_val : pair_val2};
+		c_quad_other = '{default: other_val};
+		c_pair_mref_def     = '{default: quad_src.p0};
+		c_pair_alias_def    = '{default: alias_val};
+		c_pair_2d_alias_row = '{default: alias_row};
+		c_anon_def       = '{default: anon_src.s};
+		c_cast_def_row   = arr2x3x4_t'('{default: row});
+		c_cast_idx_row   = arr2x3x4_t'('{0: other_row, default: row});
+		c_cast_expr_row  = arr2x3x4_t'('{default: row}) ^ 24'h0;
+		c_quad_cast      = quad8_t'('{default: pair_val});
+		c_quad_cast_mref = quad8_t'('{default: quad_src.p1});
 	end
 
 	always_comb assert(c2d == {4'd5, 4'd5, 4'd5});
@@ -332,4 +394,17 @@ module top (
 	always_comb assert(c2d_outer_idx == 12'hA70);
 	always_comb assert(c2d_2ps[1][5:2] == 4'h1);
 	always_comb assert(c_struct_2ps.arr[1][2:1] == 2'b01);
+	// A struct default matching a member's or element's struct type is assigned whole;
+	// a different struct type (other8_t) still recurses to the leaf members.
+	always_comb assert(c_quad_def == 16'hA5A5 && c_quad_mref == 16'h3434 && c_quad_alias == 16'h9696);
+	always_comb assert(c_quad_tern === (i[0] ? 16'hA5A5 : 16'h3C3C));
+	always_comb assert(c_quad_other == 16'hAAAA);
+	always_comb assert(c_pair_mref_def == 16'h1212 && c_pair_alias_def == 16'h9696);
+	always_comb assert(c_pair_2d_alias_row == {2{24'h123456}});
+	always_comb assert(c_anon_def == {8'hA5, 1'b1});
+	always_comb assert(P_QUAD_DEF == 16'hA5A5 && P_QUAD_CAST == 16'hA5A5);
+	always_comb assert(P_CAST_ROW == 24'h123123);
+	always_comb assert(c_cast_def_row == {12'h123, 12'h123} && c_cast_idx_row == {12'h123, 12'hABC});
+	always_comb assert(c_cast_expr_row == 24'h123123);
+	always_comb assert(c_quad_cast == 16'hA5A5 && c_quad_cast_mref == 16'h3434);
 endmodule
