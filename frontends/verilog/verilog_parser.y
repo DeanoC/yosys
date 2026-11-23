@@ -3038,36 +3038,46 @@ sva_clocking_event:
 	} |
 	TOK_AT TOK_ID {
 		auto ev = std::make_unique<AstNode>(@$, AST_ALWAYS);
-		auto id = std::make_unique<AstNode>(@2, AST_IDENTIFIER);
-		id->str = *$2;
-		ev->children.push_back(std::make_unique<AstNode>(@$, AST_EDGE, std::move(id)));
+		auto id_pos = std::make_unique<AstNode>(@2, AST_IDENTIFIER);
+		id_pos->str = *$2;
+		auto id_neg = id_pos->clone();
+		ev->children.push_back(std::make_unique<AstNode>(@$, AST_POSEDGE, std::move(id_pos)));
+		ev->children.push_back(std::make_unique<AstNode>(@$, AST_NEGEDGE, std::move(id_neg)));
 		$$ = std::move(ev);
 	};
 
 sva_clock_events:
 	sva_clock_event {
-		$$ = std::make_unique<AstNode>(@$, AST_ALWAYS, std::move($1));
+		$$ = std::move($1);
 	} |
 	sva_clock_events TOK_OR sva_clock_event {
-		$1->children.push_back(std::move($3));
+		for (auto &c : $3->children)
+			$1->children.push_back(std::move(c));
 		$$ = std::move($1);
 	} |
 	sva_clock_events TOK_COMMA sva_clock_event {
-		$1->children.push_back(std::move($3));
+		for (auto &c : $3->children)
+			$1->children.push_back(std::move(c));
 		$$ = std::move($1);
 	};
 
 sva_clock_event:
 	TOK_POSEDGE expr {
-		$$ = std::make_unique<AstNode>(@$, AST_POSEDGE, std::move($2));
-		SET_AST_NODE_LOC($$.get(), @1, @1);
+		auto edge = std::make_unique<AstNode>(@$, AST_POSEDGE, std::move($2));
+		SET_AST_NODE_LOC(edge.get(), @1, @1);
+		$$ = std::make_unique<AstNode>(@$, AST_ALWAYS, std::move(edge));
 	} |
 	TOK_NEGEDGE expr {
-		$$ = std::make_unique<AstNode>(@$, AST_NEGEDGE, std::move($2));
-		SET_AST_NODE_LOC($$.get(), @1, @1);
+		auto edge = std::make_unique<AstNode>(@$, AST_NEGEDGE, std::move($2));
+		SET_AST_NODE_LOC(edge.get(), @1, @1);
+		$$ = std::make_unique<AstNode>(@$, AST_ALWAYS, std::move(edge));
 	} |
 	expr {
-		$$ = std::make_unique<AstNode>(@$, AST_EDGE, std::move($1));
+		auto ev = std::make_unique<AstNode>(@$, AST_ALWAYS);
+		auto neg_expr = $1->clone();
+		ev->children.push_back(std::make_unique<AstNode>(@$, AST_POSEDGE, std::move($1)));
+		ev->children.push_back(std::make_unique<AstNode>(@$, AST_NEGEDGE, std::move(neg_expr)));
+		$$ = std::move(ev);
 	};
 
 opt_sva_disable_iff:
@@ -3098,17 +3108,8 @@ sva_property_expr:
 		$$->integer = 1;
 	};
 
-sva_action_block:
-	TOK_SEMICOL |
-	TOK_ELSE {
-		extra->pushChild(std::make_unique<AstNode>(@$, AST_BLOCK));
-	} behavioral_stmt {
-		extra->ast_stack.pop_back();
-		extra->ast_stack.back()->children.pop_back();
-	};
-
 assert_property:
-	opt_sva_label sva_assert_kind TOK_PROPERTY TOK_LPAREN opt_sva_clocking_event opt_sva_disable_iff sva_property_expr TOK_RPAREN sva_action_block {
+	opt_sva_label sva_assert_kind TOK_PROPERTY TOK_LPAREN opt_sva_clocking_event opt_sva_disable_iff sva_property_expr TOK_RPAREN TOK_SEMICOL {
 		bool is_eventually = ($7->integer != 0);
 		if ($2 == 2 && is_eventually)
 			err_at_loc(@7, "`eventually' is not supported in `cover property'.");

@@ -5,6 +5,13 @@ check -assert
 
 design -reset
 read_verilog -sv -formal concurrent_assert_property.sv
+hierarchy -top edge_clk
+proc
+check -assert
+select -assert-count 2 t:$check r:TRG_ENABLE=1 r:TRG_WIDTH=2 %i
+
+design -reset
+read_verilog -sv -formal concurrent_assert_property.sv
 prep -top top
 check -assert
 select -assert-count 1 c:a_dis

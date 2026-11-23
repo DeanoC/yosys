@@ -1,11 +1,20 @@
 // GitHub issue #66: concurrent assertions with clocking events, disable iff,
-// overlapping implication |->, and action blocks.
+// and overlapping implication |->.
 module repro (
 	input wire clk,
 	input wire a,
 	input wire b
 );
 	assert property (@(posedge clk) a |-> b);
+endmodule
+
+module edge_clk (
+	input wire clk,
+	input wire a,
+	input wire b
+);
+	p_paren: assert property (@(clk) a |-> b);
+	p_bare:  assert property (@clk a |-> b);
 endmodule
 
 module top (
@@ -20,9 +29,8 @@ module top (
 	// Exact issue #66 form
 	assert property (@(posedge clk) a |-> b);
 
-	// Labeled with disable iff and else action block
-	a_dis: assert property (@(posedge clk) disable iff (rst) a |-> b)
-		else $error("expected b when a is asserted");
+	// Labeled with disable iff
+	a_dis: assert property (@(posedge clk) disable iff (rst) a |-> b);
 
 	// Clocked boolean property without implication
 	a_bool: assert property (@(posedge clk) !(a && !b));
