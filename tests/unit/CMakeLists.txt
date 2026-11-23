@@ -30,6 +30,7 @@ if (GTest_FOUND)
 	add_subdirectory(kernel)
 	add_subdirectory(opt)
 	add_subdirectory(techmap)
+	add_subdirectory(frontends)
 
 	enable_testing()
 endif()

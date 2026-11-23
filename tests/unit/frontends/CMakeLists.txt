@@ -1,0 +1,10 @@
+yosys_gtest(frontends
+	svStructUnpackedArrayTest.cc
+	COMPONENTS
+		hierarchy
+		proc
+		flatten
+		opt_clean
+		opt_expr
+		write_verilog
+)
