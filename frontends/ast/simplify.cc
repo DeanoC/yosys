@@ -1472,8 +1472,84 @@ static bool assignment_pattern_has_index_key(AstNode *pattern)
 	return false;
 }
 
+static RTLIL::IdString packed_part_range_attr()
+{
+	static RTLIL::IdString attr = intern_attr_name("\\sv_packed_part_range");
+	return attr;
+}
+
+static RTLIL::IdString cast_type_dims_attr()
+{
+	static RTLIL::IdString attr = intern_attr_name("\\sv_cast_type_dims");
+	return attr;
+}
+
+static std::vector<AstNode::dimension_t> slice_packed_dims(const std::vector<AstNode::dimension_t> &decl_dims,
+		int unpacked_dims, int idx_dims, int lhs_width, AstNode *lhs)
+{
+	if (decl_dims.empty() || idx_dims < unpacked_dims)
+		return {};
+
+	auto part_range_dim = [&]() -> std::pair<bool, AstNode::dimension_t> {
+		auto it = lhs->attributes.find(packed_part_range_attr());
+		if (it != lhs->attributes.end() && it->second->type == AST_RANGE && it->second->range_valid) {
+			AstNode *r = it->second.get();
+			return {true, {r->range_right, r->range_left - r->range_right + 1, r->range_swapped}};
+		}
+		return {false, {0, 0, false}};
+	};
+
+	if (idx_dims == GetSize(decl_dims)) {
+		auto pr = part_range_dim();
+		if (pr.first && pr.second.range_width == lhs_width)
+			return {pr.second};
+		if (!lhs->children.empty()) {
+			AstNode *sel = lhs->children.back().get();
+			if (sel->type == AST_RANGE && sel->children.size() == 2) {
+				bool single_packed_dim = (GetSize(decl_dims) - unpacked_dims) == 1;
+				if (single_packed_dim && sel->range_valid)
+					return {{sel->range_right, lhs_width, sel->range_swapped}};
+				if (lhs_width > 1 || (sel->range_valid && sel->range_left == sel->range_right))
+					return {{0, lhs_width, false}};
+			}
+		}
+		return {};
+	}
+
+	if (idx_dims > GetSize(decl_dims))
+		return {};
+
+	std::vector<AstNode::dimension_t> dims(decl_dims.begin() + idx_dims, decl_dims.end());
+	int total = 1;
+	for (const auto &d : dims)
+		total *= d.range_width;
+	if (total != lhs_width) {
+		if (idx_dims > unpacked_dims && total > 0 && lhs_width > total && lhs_width % total == 0) {
+			auto pr = part_range_dim();
+			if (pr.first && pr.second.range_width == lhs_width / total)
+				dims.insert(dims.begin(), pr.second);
+			else
+				dims.insert(dims.begin(), {0, lhs_width / total, false});
+			return dims;
+		}
+		return {};
+	}
+	return dims;
+}
+
 static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs)
 {
+	auto cast_it = lhs->attributes.find(cast_type_dims_attr());
+	if (cast_it != lhs->attributes.end() && cast_it->second->type == AST_MULTIRANGE && !cast_it->second->children.empty()) {
+		std::vector<AstNode::dimension_t> dims;
+		for (auto &r : cast_it->second->children) {
+			if (r->type != AST_RANGE || !r->range_valid)
+				return {};
+			dims.push_back({r->range_right, r->range_left - r->range_right + 1, r->range_swapped});
+		}
+		return dims;
+	}
+
 	if (lhs->type != AST_IDENTIFIER || lhs->id2ast == nullptr)
 		return {};
 
@@ -1484,8 +1560,8 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs)
 		return {};
 
 	if (AstNode *member = lhs->get_struct_member()) {
-		if (member->type == AST_STRUCT_ITEM && !member->dimensions.empty() && lhs_width == packed_member_width(member))
-			return member->dimensions;
+		if (member->type == AST_STRUCT_ITEM && !member->dimensions.empty())
+			return slice_packed_dims(member->dimensions, 0, (int)lhs->integer, lhs_width, lhs);
 		return {};
 	}
 
@@ -1495,43 +1571,19 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs)
 	if (decl->dimensions.empty())
 		return {};
 
-	int start_dim = -1;
+	int idx_dims = -1;
 	if (lhs->children.empty()) {
 		if (decl->unpacked_dimensions != 0)
 			return {};
-		start_dim = 0;
+		idx_dims = 0;
 	} else if (lhs->basic_prep && lhs->integer > 0) {
-		int idx_dims = (int)lhs->integer;
-		if (idx_dims >= decl->unpacked_dimensions && idx_dims < GetSize(decl->dimensions)) {
-			start_dim = idx_dims;
-		} else if (idx_dims == GetSize(decl->dimensions) && !lhs->children.empty()) {
-			AstNode *sel = lhs->children.back().get();
-			if (sel->type == AST_RANGE && sel->children.size() == 2) {
-				bool single_packed_dim = (GetSize(decl->dimensions) - decl->unpacked_dimensions) == 1;
-				if (single_packed_dim && sel->range_valid)
-					return {{sel->range_right, lhs_width, sel->range_swapped}};
-				if (lhs_width > 1 || (sel->range_valid && sel->range_left == sel->range_right))
-					return {{0, lhs_width, false}};
-			}
-			return {};
-		}
+		idx_dims = (int)lhs->integer;
 	}
 
-	if (start_dim < 0)
+	if (idx_dims < 0)
 		return {};
 
-	std::vector<AstNode::dimension_t> dims(decl->dimensions.begin() + start_dim, decl->dimensions.end());
-	int total = 1;
-	for (const auto &d : dims)
-		total *= d.range_width;
-	if (total != lhs_width) {
-		if (start_dim > decl->unpacked_dimensions && total > 0 && lhs_width > total && lhs_width % total == 0) {
-			dims.insert(dims.begin(), {0, lhs_width / total, false});
-			return dims;
-		}
-		return {};
-	}
-	return dims;
+	return slice_packed_dims(decl->dimensions, decl->unpacked_dimensions, idx_dims, lhs_width, lhs);
 }
 
 static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern, const std::vector<AstNode::dimension_t> &dims, int dim_idx)
@@ -1888,6 +1940,22 @@ bool AstNode::resolve_cast_type(bool const_fold, int stage, int width_hint, bool
 		case AST_WIRE: {
 			if (template_node->children.size() > 0 && template_node->children[0]->type == AST_RANGE)
 				width = range_width(this, template_node->children[0].get());
+			if (GetSize(template_node->dimensions) > 1 && template_node->unpacked_dimensions == 0) {
+				auto mr = std::make_unique<AstNode>(location, AST_MULTIRANGE);
+				for (const auto &d : template_node->dimensions) {
+					int low_b = d.range_right;
+					int high_b = low_b + d.range_width - 1;
+					int l = d.range_swapped ? low_b : high_b;
+					int r = d.range_swapped ? high_b : low_b;
+					auto rn = make_range(location, l, r);
+					rn->range_valid = true;
+					rn->range_left = high_b;
+					rn->range_right = low_b;
+					rn->range_swapped = d.range_swapped;
+					mr->children.push_back(std::move(rn));
+				}
+				set_attribute(cast_type_dims_attr(), std::move(mr));
+			}
 			if (GetSize(children) > 1 && children[1]->type == AST_ASSIGN_PATTERN &&
 					!template_node->dimensions.empty() && template_node->unpacked_dimensions == 0 &&
 					(assignment_pattern_is_named(children[1].get()) || assignment_pattern_has_index_key(children[1].get()))) {
@@ -3197,6 +3265,17 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 		int dims_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.size() : 1;
 		// Save original number of dimensions for $size() etc.
 		integer = dims_sel;
+		AstNode *last_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.back().get() : children[0].get();
+		if (dims_sel > id2ast->unpacked_dimensions && last_sel->type == AST_RANGE && last_sel->children.size() == 2 && last_sel->range_valid) {
+			int l = last_sel->range_swapped ? last_sel->range_right : last_sel->range_left;
+			int r = last_sel->range_swapped ? last_sel->range_left : last_sel->range_right;
+			auto rn = make_range(location, l, r);
+			rn->range_valid = true;
+			rn->range_left = last_sel->range_left;
+			rn->range_right = last_sel->range_right;
+			rn->range_swapped = last_sel->range_swapped;
+			set_attribute(packed_part_range_attr(), std::move(rn));
+		}
 
 		// Split access into unpacked and packed parts.
 		std::unique_ptr<AstNode> unpacked_range = nullptr;
@@ -3311,6 +3390,17 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 							newNode->integer = 1;
 						else if (children[0]->type == AST_MULTIRANGE)
 							newNode->integer = children[0]->children.size();
+						AstNode *last_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.back().get() : children[0].get();
+						if (last_sel->type == AST_RANGE && last_sel->children.size() == 2 && last_sel->range_valid) {
+							int l = last_sel->range_swapped ? last_sel->range_right : last_sel->range_left;
+							int r = last_sel->range_swapped ? last_sel->range_left : last_sel->range_right;
+							auto rn = make_range(location, l, r);
+							rn->range_valid = true;
+							rn->range_left = last_sel->range_left;
+							rn->range_right = last_sel->range_right;
+							rn->range_swapped = last_sel->range_swapped;
+							newNode->set_attribute(packed_part_range_attr(), std::move(rn));
+						}
 					}
 					newNode->basic_prep = true;
 					if (item_node->is_signed)
@@ -5874,6 +5964,9 @@ replace_fcall_later:;
 				else
 					val = children[1]->bitsAsConst(width);
 				newNode = mkconst_bits(location, val.to_bits(), children[1]->is_signed);
+				auto cast_it = attributes.find(cast_type_dims_attr());
+				if (cast_it != attributes.end())
+					newNode->set_attribute(cast_type_dims_attr(), cast_it->second->clone());
 			}
 			break;
 		case AST_CONCAT:
