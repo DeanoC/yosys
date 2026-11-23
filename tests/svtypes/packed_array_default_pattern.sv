@@ -117,6 +117,10 @@ module top (
 	souter_t c_souter;
 	pair8_t [1:0] c_pair_arr;
 	pair8_t [1:0] c_pair_idx;
+	pair8_t [1:0] c_pair_nested;
+	pair8_t [1:0] c_pair_nested_idx;
+	pair8_t [1:0][2:0] c_pair_2d;
+	pair8_t [1:0] c_pair_elem;
 	logic [1:0][2:0][3:0] c3d_swrap_sarr;
 	logic [1:0][2:0][3:0] c3d_unsigned_srow;
 	logic [1:0][2:0][3:0] c3d_signed_row_cast;
@@ -149,6 +153,11 @@ module top (
 		c_souter.inner = '{a: 4'hA, b: 4'h5};
 		c_pair_arr   = '{default: P_PAIR};
 		c_pair_idx   = '{0: 8'h12, default: P_PAIR};
+		c_pair_nested     = '{default: '{a: 4'hA, b: 4'h5}};
+		c_pair_nested_idx = '{0: '{a: 4'h1, b: 4'h2}, default: '{a: 4'hA, b: 4'h5}};
+		c_pair_2d         = '{default: '{a: 4'hA, b: 4'h5}};
+		c_pair_elem       = '0;
+		c_pair_elem[1]    = '{a: 4'hA, b: 4'h5};
 		c3d_swrap_sarr = '{default: c_swrap_123.sarr};
 		c3d_unsigned_srow   = '{default: unsigned'(srow)};
 		c3d_signed_row_cast = '{default: signed'(row)};
@@ -207,6 +216,8 @@ module top (
 	always_comb assert(c_swrap_sub.sarr == 12'sh060 && c_swrap_sub.en == 1'b0);
 	always_comb assert(c_souter.inner == 8'shA5 && c_souter.tag == 1'b0);
 	always_comb assert(P_PAIR == 8'hA5 && c_pair_arr == 16'hA5A5 && c_pair_idx == 16'hA512);
+	always_comb assert(c_pair_nested == 16'hA5A5 && c_pair_nested_idx == 16'hA512);
+	always_comb assert(c_pair_2d == {6{8'hA5}} && c_pair_elem == 16'hA500);
 	always_comb assert(c3d_swrap_sarr == 24'h333333);
 	always_comb assert(c3d_unsigned_srow == 24'h123123);
 	always_comb assert(c3d_signed_row_cast == 24'h333333);
