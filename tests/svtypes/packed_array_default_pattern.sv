@@ -120,6 +120,10 @@ module top (
 	pair8_t [1:0] c_pair_nested;
 	pair8_t [1:0] c_pair_nested_idx;
 	pair8_t [1:0][2:0] c_pair_2d;
+	pair8_t [1:0][2:0] c_pair_2d_pos;
+	pair8_t [1:0][2:0] c_pair_2d_idx_pos;
+	pair8_t [1:0][1:0] c_pair_2x2_pos;
+	pair8_t [1:0][1:0] c_pair_2x2_slice;
 	pair8_t [1:0] c_pair_elem;
 	logic [1:0][2:0][3:0] c3d_swrap_sarr;
 	logic [1:0][2:0][3:0] c3d_unsigned_srow;
@@ -156,6 +160,10 @@ module top (
 		c_pair_nested     = '{default: '{a: 4'hA, b: 4'h5}};
 		c_pair_nested_idx = '{0: '{a: 4'h1, b: 4'h2}, default: '{a: 4'hA, b: 4'h5}};
 		c_pair_2d         = '{default: '{a: 4'hA, b: 4'h5}};
+		c_pair_2d_pos     = '{default: '{4'hA, 4'h5}};
+		c_pair_2d_idx_pos = '{0: '{default: '{4'h1, 4'h2}}, default: '{4'hA, 4'h5}};
+		c_pair_2x2_pos    = '{default: '{4'hA, 4'h5}};
+		c_pair_2x2_slice  = '{default: '{'{4'h1, 4'h2}, '{4'h3, 4'h4}}};
 		c_pair_elem       = '0;
 		c_pair_elem[1]    = '{a: 4'hA, b: 4'h5};
 		c3d_swrap_sarr = '{default: c_swrap_123.sarr};
@@ -218,6 +226,8 @@ module top (
 	always_comb assert(P_PAIR == 8'hA5 && c_pair_arr == 16'hA5A5 && c_pair_idx == 16'hA512);
 	always_comb assert(c_pair_nested == 16'hA5A5 && c_pair_nested_idx == 16'hA512);
 	always_comb assert(c_pair_2d == {6{8'hA5}} && c_pair_elem == 16'hA500);
+	always_comb assert(c_pair_2d_pos == {6{8'hA5}} && c_pair_2d_idx_pos == {{3{8'hA5}}, {3{8'h12}}});
+	always_comb assert(c_pair_2x2_pos == {4{8'hA5}} && c_pair_2x2_slice == {2{8'h12, 8'h34}});
 	always_comb assert(c3d_swrap_sarr == 24'h333333);
 	always_comb assert(c3d_unsigned_srow == 24'h123123);
 	always_comb assert(c3d_signed_row_cast == 24'h333333);

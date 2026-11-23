@@ -1794,6 +1794,44 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 		return false;
 	};
 
+	auto is_struct_element_pattern = [&](AstNode *pat, int next_dim) -> bool {
+		if (!elem_stype)
+			return false;
+		if (next_dim == GetSize(dims) - 1)
+			return true;
+		if (pattern_has_member_key(pat))
+			return true;
+		if (!assignment_pattern_is_named(pat) && !assignment_pattern_has_index_key(pat) &&
+				elem_stype->type == AST_STRUCT) {
+			std::vector<AstNode*> members;
+			collect_struct_members(elem_stype, members);
+			if (GetSize(pat->children) != GetSize(members))
+				return false;
+			if (GetSize(pat->children) != dims[next_dim].range_width)
+				return true;
+			int next_elem_width = 1;
+			for (int k = next_dim + 1; k < GetSize(dims); k++)
+				next_elem_width *= dims[k].range_width;
+			bool has_non_elem_width = false;
+			for (int i = 0; i < GetSize(members); i++) {
+				AstNode *ch = pat->children[i].get();
+				AstNode *m = members[i];
+				if (ch->type == AST_ASSIGN_PATTERN) {
+					if (m->type != AST_STRUCT && m->type != AST_UNION && m->dimensions.empty())
+						return false;
+				} else {
+					int cw = -1;
+					bool cs = false;
+					ch->detectSignWidth(cw, cs);
+					if (cw > 0 && cw != next_elem_width)
+						has_non_elem_width = true;
+				}
+			}
+			return has_non_elem_width;
+		}
+		return false;
+	};
+
 	auto elaborate_struct_pattern = [&](AstNode *pat) -> std::unique_ptr<AstNode> {
 		std::vector<AstNode*> members;
 		collect_struct_members(elem_stype, members);
@@ -1913,7 +1951,7 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 	if (default_elem && !has_index) {
 		auto val = strip_pattern_attrs(default_elem);
 		if (val->type == AST_ASSIGN_PATTERN) {
-			if (elem_stype && (dim_idx + 2 == GetSize(dims) || pattern_has_member_key(val.get()))) {
+			if (is_struct_element_pattern(val.get(), dim_idx + 1)) {
 				int rep_count = 1;
 				for (int k = dim_idx; k < GetSize(dims) - 1; k++)
 					rep_count *= dims[k].range_width;
@@ -1962,7 +2000,7 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 			if (!elem)
 				pattern->input_error("Indexed assignment pattern does not specify every array element\n");
 			if (!slots[s] && default_elem && default_elem->type == AST_ASSIGN_PATTERN &&
-					elem_stype && dim_idx + 2 < GetSize(dims) && pattern_has_member_key(default_elem)) {
+					dim_idx + 2 < GetSize(dims) && is_struct_element_pattern(default_elem, dim_idx + 1)) {
 				auto val = strip_pattern_attrs(default_elem);
 				int rep_count = 1;
 				for (int k = dim_idx + 1; k < GetSize(dims) - 1; k++)
