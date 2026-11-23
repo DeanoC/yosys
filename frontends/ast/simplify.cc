@@ -3024,11 +3024,22 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 						if (sel->range_valid) {
 							int l = sel->range_swapped ? sel->range_right : sel->range_left;
 							int r = sel->range_swapped ? sel->range_left : sel->range_right;
-							slice_dims->children.push_back(make_range(location, l, r));
+							auto rn = make_range(location, l, r);
+							rn->range_valid = true;
+							rn->range_left = sel->range_left;
+							rn->range_right = sel->range_right;
+							rn->range_swapped = sel->range_swapped;
+							slice_dims->children.push_back(std::move(rn));
 						} else {
-							auto dyn = make_range(location, 0, 0);
-							dyn->integer = 1; // dynamic indexed part-select (+: / -:)
-							slice_dims->children.push_back(std::move(dyn));
+							int dyn_w = 1;
+							bool ok = try_determine_range_width(sel, dyn_w);
+							auto rn = make_range(location, ok ? (dyn_w - 1) : 0, 0);
+							rn->range_valid = true;
+							rn->range_left = ok ? (dyn_w - 1) : 0;
+							rn->range_right = 0;
+							rn->range_swapped = false;
+							rn->integer = ok ? 0 : 1;
+							slice_dims->children.push_back(std::move(rn));
 						}
 					}
 				}
@@ -3038,7 +3049,12 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 					int high_b = low_b + d.range_width - 1;
 					int l = d.range_swapped ? low_b : high_b;
 					int r = d.range_swapped ? high_b : low_b;
-					slice_dims->children.push_back(make_range(location, l, r));
+					auto rn = make_range(location, l, r);
+					rn->range_valid = true;
+					rn->range_left = high_b;
+					rn->range_right = low_b;
+					rn->range_swapped = d.range_swapped;
+					slice_dims->children.push_back(std::move(rn));
 				}
 				set_attribute(packed_slice_dims_attr(), std::move(slice_dims));
 			}
@@ -4896,13 +4912,21 @@ skip_dynamic_range_lvalue_expansion:;
 					while (buf->simplify(true, stage, -1, false)) { }
 					if (buf->type == AST_STRUCT || buf->type == AST_UNION) {
 						int struct_w = buf->range_valid ? (buf->range_left - buf->range_right + 1) : size_packed_struct(buf.get(), 0);
-						if (req_dim != 1)
-							input_error("Dimension %d out of range in struct/union type, as it only has 1 dimensions!\n", req_dim);
-						width = struct_w;
-						right = low = 0;
-						left = high = width - 1;
-						expr_dimensions = 1;
-						expr_unpacked_dimensions = 0;
+						auto pdims_it = buf->attributes.find(intern_attr_name("\\sv_type_packed_dims"));
+						if (pdims_it != buf->attributes.end()) {
+							auto wnode = std::make_unique<AstNode>(location, AST_WIRE, make_range(location, struct_w - 1, 0));
+							prepend_ranges(wnode->children[0], pdims_it->second.get());
+							while (wnode->simplify(true, stage, -1, false)) { }
+							eval_from_dimensions(wnode.get(), req_dim);
+						} else {
+							if (req_dim != 1)
+								input_error("Dimension %d out of range in struct/union type, as it only has 1 dimensions!\n", req_dim);
+							width = struct_w;
+							right = low = 0;
+							left = high = width - 1;
+							expr_dimensions = 1;
+							expr_unpacked_dimensions = 0;
+						}
 					} else {
 						eval_from_dimensions(buf.get(), req_dim);
 					}

@@ -97,6 +97,24 @@ module top (
 	localparam int B_IENUM  = $bits(enum logic [2:0] { IE0, IE1 });
 	localparam int B_UENUM  = $bits(enum { IU0, IU1 });
 	localparam int B_BENUM  = $bits(enum byte { IB0, IB1 });
+	localparam int B_IENUM2 = $bits(enum logic [2:0] { IE2, IE3 } [1:0]);
+	localparam int S_IENUM1 = $size(enum logic [2:0] { IE4, IE5 } [1:0], 1);
+	localparam int S_IENUM2 = $size(enum logic [2:0] { IE6, IE7 } [1:0], 2);
+	localparam int B_ISTR2  = $bits(struct packed { logic x; logic [3:0] y; } [1:0]);
+
+	logic [0:3][0:7] asc2d;
+	localparam int S_ASC1   = $size(asc2d[1:2], 1);
+	localparam int S_ASC2   = $size(asc2d[1:2], 2);
+	localparam int L_ASC1   = $left(asc2d[1:2], 1);
+	localparam int R_ASC1   = $right(asc2d[1:2], 1);
+	localparam int L_ASC2   = $left(asc2d[1:2], 2);
+	localparam int R_ASC2   = $right(asc2d[1:2], 2);
+	localparam int B_ASC    = $bits(asc2d[1:2]);
+
+	localparam int D_DYN2   = $dimensions(p2d[idx[1:0] +: 2][idx +: 3]);
+	localparam int S_DYN2_1 = $size(p2d[idx[1:0] +: 2][idx +: 3], 1);
+	localparam int S_DYN2_2 = $size(p2d[idx[1:0] +: 2][idx +: 3], 2);
+	localparam int B_DYN2   = $bits(p2d[idx[1:0] +: 2][idx +: 3]);
 
 	// Wider LHS context must not pollute $bits width_hint
 	logic [31:0] wide_bits;
@@ -149,5 +167,8 @@ module top (
 	always_comb assert(L_2SL2 == 5 && R_2SL2 == 2 && B_2SL == 8);
 	always_comb assert(D_SLBIT == 1 && S_SLBIT == 2);
 	always_comb assert(B_IENUM == 3 && B_UENUM == 32 && B_BENUM == 8);
+	always_comb assert(B_IENUM2 == 6 && S_IENUM1 == 2 && S_IENUM2 == 3 && B_ISTR2 == 10);
+	always_comb assert(S_ASC1 == 2 && S_ASC2 == 8 && L_ASC1 == 1 && R_ASC1 == 2 && L_ASC2 == 0 && R_ASC2 == 7 && B_ASC == 16);
+	always_comb assert(D_DYN2 == 2 && S_DYN2_1 == 2 && S_DYN2_2 == 3 && B_DYN2 == 6);
 	always_comb assert(wide_bits == 32'd2);
 endmodule

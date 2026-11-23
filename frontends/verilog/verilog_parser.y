@@ -3540,7 +3540,7 @@ single_arg:
 			$1->children.push_back(std::move(range));
 		call->children.push_back(std::move($1));
 	} |
-	struct_type {
+	struct_type range_or_multirange {
 		if (!mode->sv)
 			err_at_loc(@1, "Type arguments are only supported in SystemVerilog mode.");
 		auto *call = extra->ast_stack.back();
@@ -3550,9 +3550,12 @@ single_arg:
 				call->str == "\\$dimensions" || call->str == "\\$unpacked_dimensions"))
 			err_at_loc(@1, "Type argument is only supported for array/bit query system functions.");
 		(void)extra->astbuf2.reset();
+		auto range = checkRange($1.get(), std::move($2));
+		if (range)
+			$1->set_attribute(intern_attr_name("\\sv_type_packed_dims"), std::move(range));
 		call->children.push_back(std::move($1));
 	} |
-	enum_type {
+	enum_type range_or_multirange {
 		if (!mode->sv)
 			err_at_loc(@1, "Type arguments are only supported in SystemVerilog mode.");
 		auto *call = extra->ast_stack.back();
@@ -3564,6 +3567,27 @@ single_arg:
 				call->str == "\\$low" || call->str == "\\$increment" ||
 				call->str == "\\$dimensions" || call->str == "\\$unpacked_dimensions"))
 			err_at_loc(@1, "Type argument is only supported for array/bit query system functions.");
+		auto range = checkRange($1.get(), std::move($2));
+		if (range) {
+			if ($1->children.empty()) {
+				$1->children.push_back(std::move(range));
+			} else {
+				auto mr = std::make_unique<AstNode>(@$, AST_MULTIRANGE);
+				if (range->type == AST_MULTIRANGE) {
+					for (auto &c : range->children)
+						mr->children.push_back(std::move(c));
+				} else {
+					mr->children.push_back(std::move(range));
+				}
+				if ($1->children[0]->type == AST_MULTIRANGE) {
+					for (auto &c : $1->children[0]->children)
+						mr->children.push_back(std::move(c));
+				} else {
+					mr->children.push_back(std::move($1->children[0]));
+				}
+				$1->children[0] = std::move(mr);
+			}
+		}
 		call->children.push_back(std::move($1));
 	};
 
