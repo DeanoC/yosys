@@ -54,3 +54,69 @@ module top (
 			assign b = 1'b0;
 	endgenerate
 endmodule
+
+// Every property in `top` holds however it is lowered, because b == a there.
+// The modules below pin the lowering down: the `strict_*` properties only hold
+// under the correct lowering, and each `fail_*` module has one violated
+// property that sat must find a counterexample for, so a check that never
+// fires (EN stuck at 0) cannot pass unnoticed.
+module strict_impl (
+	input  wire clk,
+	input  wire rst,
+	input  wire a,
+	input  wire c,
+	output wire b,
+	output wire d,
+	output wire e
+);
+	assign b = a || c;     // a implies b, b does not imply a
+	assign d = a && !rst;  // d follows a only while rst is low
+	assign e = a && c;     // e needs both a and c
+
+	// Fail if antecedent and consequent are swapped
+	s_dir:   assert property (@(posedge clk) a |-> b);
+	s_unclk: assert property (a |-> b);
+	// Fails if disable iff is ignored or inverted
+	s_dis:   assert property (@(posedge clk) disable iff (rst) a |-> d);
+	// Fails if either antecedent of the chain is dropped
+	s_chain: assert property (@(negedge clk) a |-> c |-> e);
+endmodule
+
+// The sampled value of clk is 0 just before a rising edge and 1 just before a
+// falling edge, so these only hold if each check fires on its own edge.
+module strict_edge (
+	input wire clk
+);
+	s_pos: assert property (@(posedge clk) !clk);
+	s_neg: assert property (@(negedge clk) clk);
+endmodule
+
+module fail_impl (
+	input wire clk,
+	input wire a,
+	input wire b
+);
+	assert property (@(posedge clk) a |-> b);
+endmodule
+
+module fail_dis (
+	input wire clk,
+	input wire rst,
+	input wire a,
+	input wire b
+);
+	assert property (@(posedge clk) disable iff (rst) a |-> b);
+endmodule
+
+module fail_unclk (
+	input wire a,
+	input wire b
+);
+	assert property (a |-> b);
+endmodule
+
+module fail_edge (
+	input wire clk
+);
+	assert property (@(posedge clk) clk);
+endmodule

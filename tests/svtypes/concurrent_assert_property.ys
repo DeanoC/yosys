@@ -32,6 +32,48 @@ hierarchy -top repro
 proc
 select -assert-count 0 t:$check
 
+# Every property in `top` holds however it is lowered, so also prove properties
+# that only hold under the correct lowering, and require a counterexample for
+# violated ones (sat -falsify fails if the proof succeeds).
+design -reset
+read_verilog -sv -formal concurrent_assert_property.sv
+prep -top strict_impl
+async2sync
+select -assert-count 4 t:$assert
+sat -seq 3 -set-init-undef -set-def-inputs -verify -prove-asserts
+
+design -reset
+read_verilog -sv -formal concurrent_assert_property.sv
+prep -top fail_impl
+async2sync
+sat -seq 3 -set-init-undef -set-def-inputs -falsify -prove-asserts
+
+design -reset
+read_verilog -sv -formal concurrent_assert_property.sv
+prep -top fail_dis
+async2sync
+sat -seq 3 -set-init-undef -set-def-inputs -falsify -prove-asserts
+
+design -reset
+read_verilog -sv -formal concurrent_assert_property.sv
+prep -top fail_unclk
+async2sync
+sat -seq 3 -set-init-undef -set-def-inputs -falsify -prove-asserts
+
+# async2sync ignores trigger polarity; clk2fflogic models the clock edges.
+design -reset
+read_verilog -sv -formal concurrent_assert_property.sv
+prep -top strict_edge
+clk2fflogic
+select -assert-count 2 t:$assert
+sat -seq 4 -set-init-undef -set-def-inputs -verify -prove-asserts
+
+design -reset
+read_verilog -sv -formal concurrent_assert_property.sv
+prep -top fail_edge
+clk2fflogic
+sat -seq 4 -set-init-undef -set-def-inputs -falsify -prove-asserts
+
 # Action blocks (`else` statements) on concurrent assertions are not supported
 # and must be rejected, not silently dropped. Keep this section last: the
 # expected error ends the script.
