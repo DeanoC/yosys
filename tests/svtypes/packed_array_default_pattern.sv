@@ -113,6 +113,8 @@ module top (
 	} other8_t;
 	localparam wrap_t P_WRAP = '{arr: '{default: 4'h6}, en: 1'b1};
 	localparam pair8_t P_PAIR = '{a: 4'hA, b: 4'h5};
+	// IEEE 1800-2017 10.9.2: a struct default does not recurse into packed-array members.
+	localparam wrap_t P_WRAP_DEF = '{default: 4'h5};
 	wrap_t c_struct;
 	wrap_t c_struct_sub;
 	swrap_t c_swrap;
@@ -138,6 +140,8 @@ module top (
 	pair8_t [1:0][2:0] c_pair_2d_match_row;
 	pair8_t [1:0][2:0] c_pair_2d_other_row;
 	wrap_t  [1:0] c_wrap_scalar;
+	wrap_t        c_wrap_def;
+	swrap_t       c_swrap_def;
 	souter_t      c_souter_scalar;
 	logic [1:0][2:0][3:0] c3d_swrap_sarr;
 	logic [1:0][2:0][3:0] c3d_unsigned_srow;
@@ -189,6 +193,8 @@ module top (
 		c_pair_2d_match_row = '{default: pair_row};
 		c_pair_2d_other_row = '{default: other_struct_row};
 		c_wrap_scalar     = '{default: 4'h5};
+		c_wrap_def        = '{default: 4'h5};
+		c_swrap_def       = '{default: 4'h5};
 		c_souter_scalar   = '{default: 4'h5};
 		c3d_swrap_sarr = '{default: c_swrap_123.sarr};
 		c3d_unsigned_srow   = '{default: unsigned'(srow)};
@@ -255,7 +261,10 @@ module top (
 	always_comb assert(c_pair_scalar_def == 16'hAAAA && c_pair_idx_scalar == 16'hAA12);
 	always_comb assert(c_pair_cast_def == 16'hA5A5 && c_pair_2d_scalar == {6{8'hAA}});
 	always_comb assert(c_pair_2d_match_row == {2{24'h123456}} && c_pair_2d_other_row == {6{8'h66}});
-	always_comb assert(c_wrap_scalar == {2{12'h555, 1'b1}} && c_souter_scalar == {8'h55, 1'b1});
+	// Struct defaults recurse into struct members (inner) but cast into packed-array members (arr/sarr).
+	always_comb assert(c_wrap_scalar == {2{12'h005, 1'b1}} && c_souter_scalar == {8'h55, 1'b1});
+	always_comb assert(c_wrap_def.arr == 12'h005 && c_wrap_def.en == 1'b1 && P_WRAP_DEF == {12'h005, 1'b1});
+	always_comb assert(c_swrap_def.sarr == 12'sh005 && c_swrap_def.en == 1'b1);
 	always_comb assert(c3d_swrap_sarr == 24'h333333);
 	always_comb assert(c3d_unsigned_srow == 24'h123123);
 	always_comb assert(c3d_signed_row_cast == 24'h333333);

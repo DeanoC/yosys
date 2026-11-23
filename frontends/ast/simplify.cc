@@ -2136,37 +2136,18 @@ static std::unique_ptr<AstNode> pattern_element_value(AstNode *elem, AstNode *me
 				elem->input_error("Positional assignment pattern is not supported for packed union member '%s'\n", member->str);
 			value = elaborate_positional_pattern(value.get(), sub);
 		}
-	} else if (is_default_elem) {
-		if (member->type == AST_STRUCT_ITEM && GetSize(member->dimensions) >= 2) {
-			bool val_signed = false;
-			AstNode *val_elem_stype = nullptr;
-			auto val_dims = packed_dims_for_lhs(value.get(), &val_signed, nullptr, &val_elem_stype);
-			bool exact_match = (GetSize(val_dims) == GetSize(member->dimensions) && val_signed == member->is_signed &&
-					val_elem_stype == struct_elem_type_for_decl(member));
-			for (int k = 0; exact_match && k < GetSize(val_dims); k++) {
-				if (val_dims[k].range_right != member->dimensions[k].range_right ||
-						val_dims[k].range_width != member->dimensions[k].range_width ||
-						val_dims[k].range_swapped != member->dimensions[k].range_swapped)
-					exact_match = false;
-			}
-			if (!exact_match) {
-				auto synth = std::make_unique<AstNode>(elem->location, AST_ASSIGN_PATTERN);
-				auto def_val = value->clone();
-				def_val->set_attribute(pattern_default_attr(), AstNode::mkconst_int(elem->location, 1, false));
-				synth->children.push_back(std::move(def_val));
-				return elaborate_packed_array_pattern(synth.get(), member->dimensions, 0,
-						signed_subarray_len_for_decl(member), struct_elem_type_for_decl(member));
-			}
-		} else if (member->type == AST_STRUCT && struct_type_for_expr(value.get()) != member) {
-			std::vector<AstNode*> sub;
-			collect_struct_members(member, sub);
-			if (!sub.empty()) {
-				auto synth = std::make_unique<AstNode>(elem->location, AST_ASSIGN_PATTERN);
-				auto def_val = value->clone();
-				def_val->set_attribute(pattern_default_attr(), AstNode::mkconst_int(elem->location, 1, false));
-				synth->children.push_back(std::move(def_val));
-				return elaborate_named_pattern(synth.get(), sub);
-			}
+	} else if (is_default_elem && member->type == AST_STRUCT && struct_type_for_expr(value.get()) != member) {
+		// IEEE 1800-2017 10.9.2: an unmatched struct default recurses only into
+		// structure (or unpacked array) members. Every other member, including a
+		// multidimensional packed array, takes the default cast to its own type.
+		std::vector<AstNode*> sub;
+		collect_struct_members(member, sub);
+		if (!sub.empty()) {
+			auto synth = std::make_unique<AstNode>(elem->location, AST_ASSIGN_PATTERN);
+			auto def_val = value->clone();
+			def_val->set_attribute(pattern_default_attr(), AstNode::mkconst_int(elem->location, 1, false));
+			synth->children.push_back(std::move(def_val));
+			return elaborate_named_pattern(synth.get(), sub);
 		}
 	}
 	return value;
