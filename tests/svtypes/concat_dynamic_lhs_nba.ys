@@ -1,0 +1,5 @@
+read_verilog -sv concat_dynamic_lhs_nba.sv
+prep -top top
+check -assert
+chformal -lower
+sat -seq 2 -set-init-zero -verify -prove-asserts -prove q_repro q_ref -prove h_repro h_ref -prove q_part q_part_ref -prove shared_vec shared_vec_ref
