@@ -125,6 +125,12 @@ module top (
 	pair8_t [1:0][1:0] c_pair_2x2_pos;
 	pair8_t [1:0][1:0] c_pair_2x2_slice;
 	pair8_t [1:0] c_pair_elem;
+	pair8_t [1:0] c_pair_scalar_def;
+	pair8_t [1:0] c_pair_idx_scalar;
+	pair8_t [1:0] c_pair_cast_def;
+	pair8_t [1:0][2:0] c_pair_2d_scalar;
+	wrap_t  [1:0] c_wrap_scalar;
+	souter_t      c_souter_scalar;
 	logic [1:0][2:0][3:0] c3d_swrap_sarr;
 	logic [1:0][2:0][3:0] c3d_unsigned_srow;
 	logic [1:0][2:0][3:0] c3d_signed_row_cast;
@@ -166,6 +172,12 @@ module top (
 		c_pair_2x2_slice  = '{default: '{'{4'h1, 4'h2}, '{4'h3, 4'h4}}};
 		c_pair_elem       = '0;
 		c_pair_elem[1]    = '{a: 4'hA, b: 4'h5};
+		c_pair_scalar_def = '{default: 4'hA};
+		c_pair_idx_scalar = '{0: 8'h12, default: 4'hA};
+		c_pair_cast_def   = '{default: pair8_t'(8'hA5)};
+		c_pair_2d_scalar  = '{default: 4'hA};
+		c_wrap_scalar     = '{default: 4'h5};
+		c_souter_scalar   = '{default: 4'h5};
 		c3d_swrap_sarr = '{default: c_swrap_123.sarr};
 		c3d_unsigned_srow   = '{default: unsigned'(srow)};
 		c3d_signed_row_cast = '{default: signed'(row)};
@@ -228,6 +240,9 @@ module top (
 	always_comb assert(c_pair_2d == {6{8'hA5}} && c_pair_elem == 16'hA500);
 	always_comb assert(c_pair_2d_pos == {6{8'hA5}} && c_pair_2d_idx_pos == {{3{8'hA5}}, {3{8'h12}}});
 	always_comb assert(c_pair_2x2_pos == {4{8'hA5}} && c_pair_2x2_slice == {2{8'h12, 8'h34}});
+	always_comb assert(c_pair_scalar_def == 16'hAAAA && c_pair_idx_scalar == 16'hAA12);
+	always_comb assert(c_pair_cast_def == 16'hA5A5 && c_pair_2d_scalar == {6{8'hAA}});
+	always_comb assert(c_wrap_scalar == {2{12'h555, 1'b1}} && c_souter_scalar == {8'h55, 1'b1});
 	always_comb assert(c3d_swrap_sarr == 24'h333333);
 	always_comb assert(c3d_unsigned_srow == 24'h123123);
 	always_comb assert(c3d_signed_row_cast == 24'h333333);
