@@ -3321,6 +3321,12 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			if (!children[1]->range_valid)
 				input_error("Non-constant width range on parameter decl.\n");
 			int width = std::abs(children[1]->range_left - children[1]->range_right) + 1;
+			// The declared range governs the shape of the value. Drop the slice
+			// dimensions a part-select initializer carries (e.g. T[2:1][2:1] folds to
+			// a constant that keeps them): references clone the value, so array
+			// queries on this parameter, or on copies of it, would otherwise report
+			// the dimensions of the initializer instead of the declared ones.
+			children[0]->attributes.erase(packed_slice_dims_attr());
 			if (children[0]->type == AST_REALVALUE) {
 				RTLIL::Const constvalue = children[0]->realAsConst(width);
 				log_file_warning(location.to_loc(), "converting real value %e to binary %s.\n",

@@ -134,3 +134,64 @@ prep -top top
 async2sync
 sat -verify -prove-asserts
 
+design -reset
+
+# Parameters with a declared range, initialized from part-selects of a packed
+# multidimensional parameter. The declared range governs: the slice dimensions
+# of the initializer must not leak into the parameter value or into copies of
+# it, so array queries report the declared range (e.g. $size(P_TT) is 4, not
+# the 2 of the T[2:1][2:1] slice).
+read_verilog -sv <<EOT
+module top;
+	localparam logic [3:0][3:0] T = {4'hA, 4'hB, 4'hC, 4'hD};
+
+	localparam logic [7:0] P_SL = T[2:1];
+	localparam logic [1:0] P_RS = T[3][2:1];
+	localparam logic [3:0] P_TT = T[2:1][2:1];
+	localparam logic [1:0] P_TI = T[2:1][0];
+	localparam logic [1:0][1:0] P_2D = T[2:1][2:1];
+	localparam P_IMP = T[2:1][2:1];
+	localparam logic [7:0] P_SL_CP = P_SL;
+	localparam logic [3:0] P_TT_CP = P_TT;
+	localparam logic [3:0] P_2D_CP = P_2D;
+	localparam logic [3:0] P_IMP_CP = P_IMP;
+
+	localparam int S_SL  = $size(P_SL);
+	localparam int L_SL  = $left(P_SL);
+	localparam int R_SL  = $right(P_SL);
+	localparam int H_SL  = $high(P_SL);
+	localparam int LO_SL = $low(P_SL);
+	localparam int D_SL  = $dimensions(P_SL);
+	localparam int B_SL  = $bits(P_SL);
+	localparam int S_TT  = $size(P_TT);
+	localparam int L_TT  = $left(P_TT);
+	localparam int R_TT  = $right(P_TT);
+	localparam int D_TT  = $dimensions(P_TT);
+	localparam int L_TI  = $left(P_TI);
+	localparam int R_TI  = $right(P_TI);
+	localparam int L_CP  = $left(P_TT_CP);
+	localparam int D_CP  = $dimensions(P_TT_CP);
+
+	always_comb assert(P_SL == 8'hBC && P_RS == 2'b01 && P_TT == 4'b0110 && P_TI == 2'b10);
+	always_comb assert(P_2D == 4'b0110 && P_IMP == 4'b0110);
+	always_comb assert(P_SL_CP == 8'hBC && P_TT_CP == 4'b0110 && P_2D_CP == 4'b0110 && P_IMP_CP == 4'b0110);
+
+	always_comb assert(S_SL == 8 && L_SL == 7 && R_SL == 0 && H_SL == 7 && LO_SL == 0 && D_SL == 1 && B_SL == 8);
+	always_comb assert(S_TT == 4 && L_TT == 3 && R_TT == 0 && D_TT == 1);
+	always_comb assert(L_TI == 1 && R_TI == 0);
+	always_comb assert(L_CP == 3 && D_CP == 1);
+
+	always_comb assert($size(P_RS) == 2 && $left(P_RS) == 1 && $right(P_RS) == 0 && $dimensions(P_RS) == 1);
+	always_comb assert($size(P_TT) == 4 && $high(P_TT) == 3 && $low(P_TT) == 0 && $bits(P_TT) == 4);
+	always_comb assert($size(P_TI) == 2 && $dimensions(P_TI) == 1);
+	always_comb assert($size(P_SL_CP) == 8 && $left(P_SL_CP) == 7 && $right(P_SL_CP) == 0 && $dimensions(P_SL_CP) == 1);
+	always_comb assert($size(P_TT_CP) == 4 && $right(P_TT_CP) == 0);
+	always_comb assert($dimensions(P_2D) == 2 && $size(P_2D, 1) == 2 && $left(P_2D, 1) == 1 && $right(P_2D, 1) == 0);
+	always_comb assert($size(P_2D_CP) == 4 && $left(P_2D_CP) == 3 && $right(P_2D_CP) == 0 && $dimensions(P_2D_CP) == 1);
+	always_comb assert($size(P_IMP_CP) == 4 && $left(P_IMP_CP) == 3 && $right(P_IMP_CP) == 0 && $dimensions(P_IMP_CP) == 1);
+endmodule
+EOT
+prep -top top
+async2sync
+sat -verify -prove-asserts
+
