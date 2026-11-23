@@ -2563,7 +2563,7 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 				current_scope.count(children[i]->str)) {
 			AstNode *target = current_scope.at(children[i]->str);
 			if ((target->type == AST_PARAMETER || target->type == AST_LOCALPARAM) &&
-					(!target->dimensions.empty() ||
+					(GetSize(target->dimensions) > 1 ||
 					 (target->children.size() > 1 && target->children[1]->type == AST_MULTIRANGE)))
 				continue;
 		}
@@ -4826,7 +4826,14 @@ skip_dynamic_range_lvalue_expansion:;
 				int expr_dimensions = 0, expr_unpacked_dimensions = 0;
 				AstNode *id_ast = nullptr;
 
-				buf->detectSignWidth(width_hint, sign_hint);
+				bool skip_detect = false;
+				if (buf->type == AST_IDENTIFIER && !buf->basic_prep) {
+					AstNode *target = buf->id2ast ? buf->id2ast : (current_scope.count(buf->str) ? current_scope.at(buf->str) : nullptr);
+					if (target && (target->type == AST_PARAMETER || target->type == AST_LOCALPARAM))
+						skip_detect = true;
+				}
+				if (!skip_detect)
+					buf->detectSignWidth(width_hint, sign_hint);
 
 				if (buf->type == AST_IDENTIFIER) {
 					id_ast = buf->id2ast;
@@ -4859,37 +4866,83 @@ skip_dynamic_range_lvalue_expansion:;
 						if (item_node)
 							id_ast = item_node;
 
-						// The dimension of the original array expression is saved in the 'integer' field.
-						// For struct array member selects, buf->integer counts outer array indices
-						// (for memory access checks), not dimensions sliced off the member itself.
-						if (!from_struct_array_member) {
-							if ((id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) &&
-									!buf->basic_prep && !buf->children.empty()) {
-								if (buf->children[0]->type == AST_MULTIRANGE)
-									dim += GetSize(buf->children[0]->children);
-								else if (buf->children[0]->type == AST_RANGE)
-									dim += 1;
-							} else {
-								dim += buf->integer;
+						int dims = GetSize(id_ast->dimensions);
+						bool is_param_query = (id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) && !buf->basic_prep;
+						AstNode *param_last_sel = nullptr;
+						int param_idx_dims = 0;
+						if (is_param_query && !buf->children.empty()) {
+							if (buf->children[0]->type == AST_MULTIRANGE) {
+								param_idx_dims = GetSize(buf->children[0]->children);
+								if (param_idx_dims > 0)
+									param_last_sel = buf->children[0]->children.back().get();
+							} else if (buf->children[0]->type == AST_RANGE) {
+								param_idx_dims = 1;
+								param_last_sel = buf->children[0].get();
 							}
 						}
 
-						int dims = GetSize(id_ast->dimensions);
-						// TODO: IEEE Std 1800-2017 20.7: "If the first argument to an array query function would cause $dimensions to return 0
-						// or if the second argument is out of range, then 'x shall be returned."
-						if (dim < 1 || dim > dims)
-							input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", dim, id_ast->str, dims);
+						if (is_param_query && param_last_sel && param_last_sel->type == AST_RANGE &&
+								param_last_sel->children.size() == 2 && param_idx_dims >= 1 && param_idx_dims <= dims) {
+							while (param_last_sel->simplify(true, stage, -1, false)) { }
+							int total_dims = (dims - param_idx_dims) + 1;
+							if (dim < 1 || dim > total_dims)
+								input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", dim, id_ast->str, total_dims);
+							if (dim == 1) {
+								expr_dimensions = total_dims;
+								expr_unpacked_dimensions = 0;
+								if (param_last_sel->range_valid) {
+									right = low = param_last_sel->range_right;
+									left = high = param_last_sel->range_left;
+									if (param_last_sel->range_swapped)
+										std::swap(left, right);
+								} else {
+									int sel_width = range_width(id_ast, param_last_sel);
+									right = low = 0;
+									left = high = sel_width - 1;
+								}
+								for (int i = param_idx_dims; i < dims; i++)
+									mem_depth *= id_ast->dimensions[i].range_width;
+							} else {
+								int target_dim = param_idx_dims + dim - 1;
+								expr_dimensions = dims - target_dim + 1;
+								expr_unpacked_dimensions = 0;
+								right = low  = id_ast->dimensions[target_dim - 1].range_right;
+								left  = high = low + id_ast->dimensions[target_dim - 1].range_width - 1;
+								if (id_ast->dimensions[target_dim - 1].range_swapped)
+									std::swap(left, right);
+								for (int i = target_dim; i < dims; i++)
+									mem_depth *= id_ast->dimensions[i].range_width;
+							}
+						} else if (is_param_query && param_idx_dims == dims) {
+							if (dim != 1)
+								input_error("Dimension %d out of range in `%s', as it only has 1 dimensions!\n", dim, id_ast->str);
+							right = low = 0;
+							left = high = 0;
+							expr_dimensions = 1;
+							expr_unpacked_dimensions = 0;
+						} else {
+							// The dimension of the original array expression is saved in the 'integer' field.
+							// For struct array member selects, buf->integer counts outer array indices
+							// (for memory access checks), not dimensions sliced off the member itself.
+							if (!from_struct_array_member)
+								dim += is_param_query ? param_idx_dims : buf->integer;
 
-						expr_dimensions = dims - dim + 1;
-						expr_unpacked_dimensions = std::max(id_ast->unpacked_dimensions - dim + 1, 0);
+							// TODO: IEEE Std 1800-2017 20.7: "If the first argument to an array query function would cause $dimensions to return 0
+							// or if the second argument is out of range, then 'x shall be returned."
+							if (dim < 1 || dim > dims)
+								input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", dim, id_ast->str, dims);
 
-						right = low  = id_ast->dimensions[dim - 1].range_right;
-						left  = high = low + id_ast->dimensions[dim - 1].range_width - 1;
-						if (id_ast->dimensions[dim - 1].range_swapped) {
-							std::swap(left, right);
-						}
-						for (int i = dim; i < dims; i++) {
-							mem_depth *= id_ast->dimensions[i].range_width;
+							expr_dimensions = dims - dim + 1;
+							expr_unpacked_dimensions = std::max(id_ast->unpacked_dimensions - dim + 1, 0);
+
+							right = low  = id_ast->dimensions[dim - 1].range_right;
+							left  = high = low + id_ast->dimensions[dim - 1].range_width - 1;
+							if (id_ast->dimensions[dim - 1].range_swapped) {
+								std::swap(left, right);
+							}
+							for (int i = dim; i < dims; i++) {
+								mem_depth *= id_ast->dimensions[i].range_width;
+							}
 						}
 					}
 					width = high - low + 1;

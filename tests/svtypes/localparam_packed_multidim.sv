@@ -81,6 +81,15 @@ module top #(
 	localparam int B_P3_1 = $bits(P3[1]);
 	localparam int L_U1   = $left(T_upto, 1);
 	localparam int R_U1   = $right(T_upto, 1);
+	localparam int B_1D_B = $bits(T_flat[0]);
+	localparam int B_2D_B = $bits(T[3][2]);
+	localparam int S_2D_B = $size(T[3][2]);
+	localparam int D_2D_B = $dimensions(T[3][2]);
+	localparam int B_SL   = $bits(T[2:1]);
+	localparam int S_SL1  = $size(T[2:1], 1);
+	localparam int S_SL2  = $size(T[2:1], 2);
+	localparam int D_SL   = $dimensions(T[2:1]);
+	localparam int B_PS   = $bits(T[3][2:1]);
 
 	always_comb assert(D_T == 2);
 	always_comb assert(S_T1 == 4);
@@ -98,4 +107,9 @@ module top #(
 	always_comb assert(S_P312 == 4);
 	always_comb assert(B_P3_1 == 8);
 	always_comb assert(L_U1 == 0 && R_U1 == 3);
+	always_comb assert(B_1D_B == 1);
+	always_comb assert(B_2D_B == 1 && S_2D_B == 1 && D_2D_B == 1);
+	always_comb assert($bits(T[a][b]) == 1);
+	always_comb assert(B_SL == 8 && S_SL1 == 2 && S_SL2 == 4 && D_SL == 2);
+	always_comb assert(B_PS == 2);
 endmodule
