@@ -42,10 +42,16 @@ module top (
 	logic [1:0][3:0]       c2d_bit_def;
 	logic [1:0][3:0]       c2d_idx_bit_def;
 	logic [1:0][2:0][3:0]  c3d_bit_def;
+	logic [1:0][2:0][3:0]  c3d_fn_row;
+	logic [1:0][2:0][3:0]  c3d_idx_fn_row;
 
 	typedef logic [2:0][3:0] arr3x4_t;
 	localparam arr3x4_t ROW_LP = 12'h123;
 	arr3x4_t c_cast;
+
+	function automatic arr3x4_t make_row();
+		return 12'h123;
+	endfunction
 
 	typedef struct packed {
 		logic [2:0][3:0] arr;
@@ -76,6 +82,8 @@ module top (
 		c3d_cast_row = '{default: arr3x4_t'(12'h123)};
 		c3d_lp_row   = '{default: ROW_LP};
 		c3d_idx_lp_row = '{0: other_row, default: ROW_LP};
+		c3d_fn_row   = '{default: make_row()};
+		c3d_idx_fn_row = '{0: other_row, default: make_row()};
 		c2d_bit_def  = '{default: 1'b1};
 		c2d_idx_bit_def = '{0: 4'hA, default: 1'b1};
 		c3d_bit_def  = '{default: 1'b1};
@@ -110,6 +118,8 @@ module top (
 	always_comb assert(c3d_cast_row == {12'h123, 12'h123});
 	always_comb assert(c3d_lp_row == {12'h123, 12'h123});
 	always_comb assert(c3d_idx_lp_row == {12'h123, 12'hABC});
+	always_comb assert(c3d_fn_row == {12'h123, 12'h123});
+	always_comb assert(c3d_idx_fn_row == {12'h123, 12'hABC});
 	always_comb assert(c2d_bit_def == 8'hFF);
 	always_comb assert(c2d_idx_bit_def == 8'hFA);
 	always_comb assert(c3d_bit_def == 24'hFFFFFF);

@@ -5533,6 +5533,15 @@ skip_dynamic_range_lvalue_expansion:;
 				// func_workspace->dumpAst(stdout, "func_workspace ");
 				newNode = func_workspace->eval_const_function(this, in_param || require_const_eval);
 				if (newNode) {
+					for (auto &child : func_workspace->children) {
+						if (child->type == AST_WIRE && child->str == func_workspace->str) {
+							auto ret_wire = child->clone();
+							while (ret_wire->simplify(true, 1, -1, false)) { }
+							if (GetSize(ret_wire->dimensions) > 1 && ret_wire->unpacked_dimensions == 0)
+								newNode->set_attribute(cast_type_dims_attr(), make_dims_multirange(location, ret_wire->dimensions));
+							break;
+						}
+					}
 					goto apply_newNode;
 				}
 			}
