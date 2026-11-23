@@ -73,6 +73,19 @@ module top (
 	localparam int S_ARR3_1 = $size(arr2d_t [1:0], 1);
 	localparam int S_ARR3_2 = $size(arr2d_t [1:0], 2);
 	localparam int S_ARR3_3 = $size(arr2d_t [1:0], 3);
+	localparam int D_SL     = $dimensions(p2d[2:1]);
+	localparam int S_SL1    = $size(p2d[2:1], 1);
+	localparam int S_SL2    = $size(p2d[2:1], 2);
+	localparam int L_SL1    = $left(p2d[2:1]);
+	localparam int R_SL1    = $right(p2d[2:1]);
+	localparam int D_SL11   = $dimensions(p2d[1:1]);
+	localparam int S_SL11_1 = $size(p2d[1:1], 1);
+	localparam int S_SL11_2 = $size(p2d[1:1], 2);
+	localparam int D_ELEM   = $dimensions(p2d[1]);
+	localparam int S_ELEM   = $size(p2d[1]);
+	localparam int D_FPS    = $dimensions(f[9:8]);
+	localparam int L_FPS    = $left(f[9:8]);
+	localparam int R_FPS    = $right(f[9:8]);
 
 	// Wider LHS context must not pollute $bits width_hint
 	logic [31:0] wide_bits;
@@ -113,5 +126,13 @@ module top (
 	always_comb assert(S_ARR3_1 == 2);
 	always_comb assert(S_ARR3_2 == 3);
 	always_comb assert(S_ARR3_3 == 4);
+	always_comb assert(D_SL == 2);
+	always_comb assert(S_SL1 == 2);
+	always_comb assert(S_SL2 == 8);
+	always_comb assert(L_SL1 == 2 && R_SL1 == 1);
+	always_comb assert(D_SL11 == 2);
+	always_comb assert(S_SL11_1 == 1 && S_SL11_2 == 8);
+	always_comb assert(D_ELEM == 1 && S_ELEM == 8);
+	always_comb assert(D_FPS == 1 && L_FPS == 9 && R_FPS == 8);
 	always_comb assert(wide_bits == 32'd2);
 endmodule

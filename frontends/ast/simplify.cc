@@ -517,6 +517,24 @@ static RTLIL::IdString struct_array_member_width_attr()
 	return attr;
 }
 
+static RTLIL::IdString packed_part_select_attr()
+{
+	static RTLIL::IdString attr = intern_attr_name("\\sv_packed_part_select");
+	return attr;
+}
+
+static RTLIL::IdString packed_part_left_attr()
+{
+	static RTLIL::IdString attr = intern_attr_name("\\sv_packed_part_left");
+	return attr;
+}
+
+static RTLIL::IdString packed_part_right_attr()
+{
+	static RTLIL::IdString attr = intern_attr_name("\\sv_packed_part_right");
+	return attr;
+}
+
 static std::unique_ptr<AstNode> normalize_index(AstNode *expr, AstNode *decl_node, int dimension)
 {
 	auto new_expr = expr->clone();
@@ -2998,6 +3016,19 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 		// Save original number of dimensions for $size() etc.
 		integer = dims_sel;
 
+		// Distinguish a packed part-select (which preserves the selected dimension)
+		// from a scalar index (which consumes it) before flattening.
+		AstNode *last_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.back().get() : children[0].get();
+		if (dims_sel > id2ast->unpacked_dimensions && last_sel->type == AST_RANGE && last_sel->children.size() == 2) {
+			set_attribute(packed_part_select_attr(), mkconst_int(location, 1, false));
+			if (last_sel->range_valid) {
+				int part_left = last_sel->range_swapped ? last_sel->range_right : last_sel->range_left;
+				int part_right = last_sel->range_swapped ? last_sel->range_left : last_sel->range_right;
+				set_attribute(packed_part_left_attr(), mkconst_int(location, part_left, true));
+				set_attribute(packed_part_right_attr(), mkconst_int(location, part_right, true));
+			}
+		}
+
 		// Split access into unpacked and packed parts.
 		std::unique_ptr<AstNode> unpacked_range = nullptr;
 		std::unique_ptr<AstNode> packed_range = nullptr;
@@ -4896,8 +4927,34 @@ skip_dynamic_range_lvalue_expansion:;
 							// (for memory access checks), not dimensions sliced off the member itself.
 							int idx_dims = from_struct_array_member ? 0 : (int)buf->integer;
 							int dims = GetSize(id_ast->dimensions);
+							bool is_part_select = !from_struct_array_member && buf->attributes.count(packed_part_select_attr()) &&
+									idx_dims > id_ast->unpacked_dimensions && idx_dims <= dims && arg_width > 0;
 
-							if (str == "\\$bits" && !buf->children.empty() && idx_dims >= id_ast->unpacked_dimensions && arg_width > 0) {
+							if (is_part_select) {
+								int total_dims = (dims - idx_dims) + 1;
+								if (req_dim < 1 || req_dim > total_dims)
+									input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", req_dim, id_ast->str, total_dims);
+								if (req_dim == 1) {
+									int inner_stride = 1;
+									for (int i = idx_dims; i < dims; i++)
+										inner_stride *= id_ast->dimensions[i].range_width;
+									width = inner_stride > 0 ? (arg_width / inner_stride) : arg_width;
+									mem_depth = inner_stride;
+									expr_dimensions = total_dims;
+									expr_unpacked_dimensions = 0;
+									if (buf->attributes.count(packed_part_left_attr()) && buf->attributes.count(packed_part_right_attr())) {
+										left = buf->attributes.at(packed_part_left_attr())->asInt(true);
+										right = buf->attributes.at(packed_part_right_attr())->asInt(true);
+										high = std::max(left, right);
+										low = std::min(left, right);
+									} else {
+										right = low = 0;
+										left = high = width - 1;
+									}
+								} else {
+									eval_from_dimensions(id_ast, idx_dims + req_dim - 1);
+								}
+							} else if (str == "\\$bits" && !buf->children.empty() && idx_dims >= id_ast->unpacked_dimensions && arg_width > 0) {
 								// Any packed bit-select, part-select, or fully-unpacked-indexed
 								// slice has bit width given directly by detectSignWidth().
 								width = arg_width;
@@ -4906,7 +4963,7 @@ skip_dynamic_range_lvalue_expansion:;
 								expr_dimensions = 1;
 								expr_unpacked_dimensions = 0;
 							} else if (!buf->children.empty() && idx_dims == dims && req_dim == 1 && arg_width > 0) {
-								// Part-select or bit-select of the innermost packed dimension
+								// Scalar bit-select of the innermost packed dimension
 								// produces a 1-D vector/bit of width arg_width.
 								width = arg_width;
 								right = low = 0;
