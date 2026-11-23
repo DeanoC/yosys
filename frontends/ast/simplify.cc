@@ -1592,7 +1592,9 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs)
 		if (!t_dims.empty() && t_dims.size() == f_dims.size()) {
 			bool same = true;
 			for (size_t i = 0; i < t_dims.size(); i++) {
-				if (t_dims[i].range_width != f_dims[i].range_width) {
+				if (t_dims[i].range_right != f_dims[i].range_right ||
+						t_dims[i].range_width != f_dims[i].range_width ||
+						t_dims[i].range_swapped != f_dims[i].range_swapped) {
 					same = false;
 					break;
 				}
@@ -1702,7 +1704,9 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 					continue;
 				bool match = true;
 				for (int k = 0; k < sub_len; k++) {
-					if (val_dims[k].range_width != dims[d + k].range_width) {
+					if (val_dims[k].range_right != dims[d + k].range_right ||
+							val_dims[k].range_width != dims[d + k].range_width ||
+							val_dims[k].range_swapped != dims[d + k].range_swapped) {
 						match = false;
 						break;
 					}
@@ -1728,19 +1732,9 @@ static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern,
 	auto elaborate_default_nonpattern = [&](std::unique_ptr<AstNode> val, int start_dim) -> std::unique_ptr<AstNode> {
 		if (auto sub_rep = matching_subarray_default(val.get(), start_dim))
 			return sub_rep;
-		int val_width = -1;
-		bool val_sign = true;
-		val->detectSignWidth(val_width, val_sign);
 		int total_bits = 1;
 		for (int d = start_dim; d < GetSize(dims); d++)
 			total_bits *= dims[d].range_width;
-		if (val_width == 1) {
-			if (total_bits == 1)
-				return cast_to_width(loc, 1, std::move(val));
-			return std::make_unique<AstNode>(loc, AST_REPLICATE,
-					AstNode::mkconst_int(loc, total_bits, false),
-					cast_to_width(loc, 1, std::move(val)));
-		}
 		int rem = GetSize(dims) - start_dim;
 		if (rem <= 0)
 			return cast_to_width(loc, 1, std::move(val));

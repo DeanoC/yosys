@@ -47,6 +47,10 @@ module top (
 	logic [1:0][2:0][3:0]  c3d_tern_row;
 	logic [1:0][2:0][3:0]  c3d_idx_tern_row;
 	logic [1:0][2:0][3:0]  c3d_p_arr;
+	logic [4:2][3:0]       row_42;
+	logic [0:2][3:0]       row_asc;
+	logic [1:0][2:0][3:0]  c3d_diff_bounds;
+	logic [1:0][2:0][3:0]  c3d_diff_dir;
 
 	typedef logic [2:0][3:0] arr3x4_t;
 	typedef logic [1:0][2:0][3:0] arr2x3x4_t;
@@ -73,6 +77,8 @@ module top (
 	always_comb begin
 		row          = 12'h123;
 		other_row    = 12'hABC;
+		row_42       = 12'h123;
+		row_asc      = 12'h123;
 		c2d          = '{default: 4'd5};
 		c3d          = '{default: 4'hA};
 		c3d_nested   = '{default: '{default: 4'hC}};
@@ -97,6 +103,8 @@ module top (
 		c3d_tern_row = '{default: i[0] ? row : other_row};
 		c3d_idx_tern_row = '{0: row, default: i[0] ? other_row : ROW_LP};
 		c3d_p_arr    = '{default: P_ARR};
+		c3d_diff_bounds = '{default: row_42};
+		c3d_diff_dir    = '{default: row_asc};
 		c2d_bit_def  = '{default: 1'b1};
 		c2d_idx_bit_def = '{0: 4'hA, default: 1'b1};
 		c3d_bit_def  = '{default: 1'b1};
@@ -142,9 +150,11 @@ module top (
 	always_comb assert(PARAM_ARR == 12'h333);
 	always_comb assert(P_WRAP == {12'h666, 1'b1});
 	always_comb assert(c3d_p_arr == 24'hAAAAAA);
-	always_comb assert(c2d_bit_def == 8'hFF);
-	always_comb assert(c2d_idx_bit_def == 8'hFA);
-	always_comb assert(c3d_bit_def == 24'hFFFFFF);
+	always_comb assert(c3d_diff_bounds == 24'h333333);
+	always_comb assert(c3d_diff_dir == 24'h333333);
+	always_comb assert(c2d_bit_def == 8'h11);
+	always_comb assert(c2d_idx_bit_def == 8'h1A);
+	always_comb assert(c3d_bit_def == 24'h111111);
 	always_comb assert(v_ps == 8'h0F);
 	always_comb assert(v_ps_idx == 8'b1110_0011);
 	always_comb assert(c2d_ps == 12'h060);
