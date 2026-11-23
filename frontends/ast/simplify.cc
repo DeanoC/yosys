@@ -1433,11 +1433,19 @@ static std::vector<AstNode*> members_for_decl(AstNode *decl)
 	return members;
 }
 
+static AstNode *unwrap_signed_member_target(AstNode *lhs)
+{
+	while ((lhs->type == AST_TO_SIGNED || lhs->type == AST_TO_UNSIGNED) && lhs->children.size() == 1)
+		lhs = lhs->children[0].get();
+	return lhs;
+}
+
 // Packed struct or union members of an assignment target. Typedef instances are
 // recovered from the wiretype attribute; anonymous structs from the member scope
 // entries created when the struct was packed.
 static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
 {
+	lhs = unwrap_signed_member_target(lhs);
 	std::vector<AstNode*> members;
 	if (AstNode *member = lhs->get_struct_member()) {
 		if (member->type == AST_STRUCT || member->type == AST_UNION) {
@@ -1456,6 +1464,7 @@ static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
 
 static bool is_whole_struct_pattern_target(AstNode *lhs)
 {
+	lhs = unwrap_signed_member_target(lhs);
 	if (lhs->type != AST_IDENTIFIER)
 		return false;
 	if (lhs->children.empty())
