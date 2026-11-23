@@ -2281,10 +2281,30 @@ enum_var: TOK_ID {
 		SET_AST_NODE_LOC(node.get(), @1, @1);
 		node->is_enum = true;
 		extra->ast_stack.back()->children.push_back(std::move(node));
+		extra->addLocalName($1.get());
+	}
+	| TOK_ID TOK_EQ expr {
+		log_assert((bool)extra->astbuf1);
+		auto node = extra->astbuf1->clone();
+		node->str = *$1;
+		SET_AST_NODE_LOC(node.get(), @1, @1);
+		node->is_enum = true;
+		extra->ast_stack.back()->children.push_back(std::move(node));
+		extra->addLocalName($1.get());
+
+		auto wire = std::make_unique<AstNode>(@1, AST_IDENTIFIER);
+		wire->str = *$1;
+		auto assign = std::make_unique<AstNode>(@$, AST_ASSIGN_LE, std::move(wire), std::move($3));
+		SET_AST_NODE_LOC(assign.get(), @1, @3);
+		auto block = std::make_unique<AstNode>(@$, AST_BLOCK, std::move(assign));
+		SET_AST_NODE_LOC(block.get(), @1, @3);
+		auto init = std::make_unique<AstNode>(@$, AST_INITIAL, std::move(block));
+		SET_AST_NODE_LOC(init.get(), @1, @3);
+		extra->ast_stack.back()->children.push_back(std::move(init));
 	}
 	;
 
-enum_decl: enum_type enum_var_list TOK_SEMICOL		{  }
+enum_decl: enum_type enum_var_list TOK_SEMICOL		{ (void)extra->astbuf1.reset(); }
 	;
 
 //////////////////
@@ -2391,6 +2411,24 @@ struct_var:
 		var_node->str = *$1;
 		SET_AST_NODE_LOC(var_node.get(), @1, @1);
 		extra->ast_stack.back()->children.push_back(std::move(var_node));
+		extra->addLocalName($1.get());
+	}
+	| TOK_ID TOK_EQ expr {
+		auto var_node = extra->astbuf2->clone();
+		var_node->str = *$1;
+		SET_AST_NODE_LOC(var_node.get(), @1, @1);
+		extra->ast_stack.back()->children.push_back(std::move(var_node));
+		extra->addLocalName($1.get());
+
+		auto wire = std::make_unique<AstNode>(@1, AST_IDENTIFIER);
+		wire->str = *$1;
+		auto assign = std::make_unique<AstNode>(@$, AST_ASSIGN_LE, std::move(wire), std::move($3));
+		SET_AST_NODE_LOC(assign.get(), @1, @3);
+		auto block = std::make_unique<AstNode>(@$, AST_BLOCK, std::move(assign));
+		SET_AST_NODE_LOC(block.get(), @1, @3);
+		auto init = std::make_unique<AstNode>(@$, AST_INITIAL, std::move(block));
+		SET_AST_NODE_LOC(init.get(), @1, @3);
+		extra->ast_stack.back()->children.push_back(std::move(init));
 	};
 
 /////////
