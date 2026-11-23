@@ -8,7 +8,7 @@ read_verilog -sv -formal concurrent_assert_property.sv
 hierarchy -top edge_clk
 proc
 check -assert
-select -assert-count 2 t:$check r:TRG_ENABLE=1 r:TRG_WIDTH=2 %i
+select -assert-count 2 t:$check r:TRG_ENABLE=1 %i r:TRG_WIDTH=2 %i
 
 design -reset
 read_verilog -sv -formal concurrent_assert_property.sv
@@ -31,3 +31,18 @@ read_verilog -sv -noassert concurrent_assert_property.sv
 hierarchy -top repro
 proc
 select -assert-count 0 t:$check
+
+# Action blocks (`else` statements) on concurrent assertions are not supported
+# and must be rejected, not silently dropped. Keep this section last: the
+# expected error ends the script.
+design -reset
+logger -expect error "syntax error, unexpected TOK_ELSE" 1
+read_verilog -sv -formal <<EOT
+module action_block (
+	input wire clk,
+	input wire a,
+	input wire b
+);
+	assert property (@(posedge clk) a |-> b) else $error("b must follow a");
+endmodule
+EOT

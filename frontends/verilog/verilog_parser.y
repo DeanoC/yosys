@@ -3108,6 +3108,9 @@ sva_property_expr:
 		$$->integer = 1;
 	};
 
+// Action blocks ("else <statement>") are deliberately not accepted: there is no
+// lowering for them, and parsing then discarding the statement would silently
+// drop user code. An "else" after the closing parenthesis is a syntax error.
 assert_property:
 	opt_sva_label sva_assert_kind TOK_PROPERTY TOK_LPAREN opt_sva_clocking_event opt_sva_disable_iff sva_property_expr TOK_RPAREN TOK_SEMICOL {
 		bool is_eventually = ($7->integer != 0);
