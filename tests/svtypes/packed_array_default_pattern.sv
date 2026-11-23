@@ -1,0 +1,410 @@
+// GitHub issue #62: '{default: v} (and keyed/nested patterns) on packed
+// multidimensional arrays, packed vectors, struct packed-array members, and typedef casts.
+module top (
+	input  logic       clk,
+	input  logic [3:0] i,
+	output logic [3:0] o_repro,
+	output logic [3:0] o_repro_ref
+);
+	// Case 1: exact issue #62 repro
+	logic [2:0][3:0] r = '{default: 4'd5};
+	always_ff @(posedge clk) r <= {r[1:0], i};
+	assign o_repro = r[2];
+
+	logic [2:0][3:0] r_ref;
+	initial r_ref = {4'd5, 4'd5, 4'd5};
+	always_ff @(posedge clk) r_ref <= {r_ref[1:0], i};
+	assign o_repro_ref = r_ref[2];
+
+	// Case 2: combinational 2-D, 3-D, nested default, indexed+default, ascending, 1-D vector
+	logic [2:0][3:0]       c2d;
+	logic [1:0][2:0][3:0]  c3d;
+	logic [1:0][2:0][3:0]  c3d_nested;
+	logic [2:0][3:0]       c_idx;
+	logic [0:2][3:0]       c_upto;
+	logic [7:0]            c1d;
+	logic [1:0][2:0][3:0]  c_sub;
+	logic [2:0][3:0]       row;
+	logic [2:0][3:0]       other_row;
+	logic [1:0][2:0][3:0]  c3d_row;
+	logic [1:0][2:0][3:0]  c3d_idx_row;
+	logic [1:0][2:0][3:0]  c3d_idx_leaf;
+	logic [1:0][1:0][2:0][3:0] c4d_row;
+	logic [7:0]            v_ps;
+	logic [7:0]            v_ps_idx;
+	logic [2:0][3:0]       c2d_ps;
+	logic [2:0][3:0]       c2d_outer_ps;
+	logic [2:0][3:0]       c2d_ps_idx;
+	logic [2:0][3:0]       c2d_outer_idx;
+	logic [1:0][2:0][3:0]  c3d_cast_row;
+	logic [1:0][2:0][3:0]  c3d_lp_row;
+	logic [1:0][2:0][3:0]  c3d_idx_lp_row;
+	logic [1:0][3:0]       c2d_bit_def;
+	logic [1:0][3:0]       c2d_idx_bit_def;
+	logic [1:0][2:0][3:0]  c3d_bit_def;
+	logic [1:0][2:0][3:0]  c3d_fn_row;
+	logic [1:0][2:0][3:0]  c3d_idx_fn_row;
+	logic [1:0][2:0][3:0]  c3d_tern_row;
+	logic [1:0][2:0][3:0]  c3d_idx_tern_row;
+	logic [1:0][2:0][3:0]  c3d_p_arr;
+	logic [4:2][3:0]       row_42;
+	logic [0:2][3:0]       row_asc;
+	logic signed [2:0][3:0] srow;
+	logic signed [2:0][3:0] srow_abc;
+	logic [1:0][2:0][3:0]  c3d_diff_bounds;
+	logic [1:0][2:0][3:0]  c3d_diff_dir;
+	logic [1:0][2:0][3:0]  c3d_signed_row;
+	logic [1:0][2:0][3:0]  c3d_signed_cast;
+	logic [1:0][2:0][3:0]  c3d_signed_lp;
+	logic [1:0][2:0][3:0]  c3d_signed_fn;
+	logic [1:0][2:0][3:0]  c3d_mixed_tern;
+	logic signed [1:0][2:0][3:0] sc3d_row;
+	logic signed [1:0][2:0][3:0] sc3d_srow;
+
+	typedef logic [2:0][3:0] arr3x4_t;
+	typedef logic signed [2:0][3:0] sarr3x4_t;
+	typedef sarr3x4_t [1:0] spair_t;
+	typedef logic [1:0][2:0][3:0] arr2x3x4_t;
+	localparam arr3x4_t ROW_LP = 12'h123;
+	localparam sarr3x4_t SROW_LP = 12'h123;
+	localparam arr3x4_t P_ARR = '{default: 4'hA};
+	localparam arr3x4_t P_ARR_IDX = '{0: 4'h1, default: 4'h5};
+	localparam logic [7:0] P_VEC = '{default: 1'b1};
+	localparam arr2x3x4_t P_3D_SUB = '{default: P_ARR};
+	localparam arr2x3x4_t P_UNSIGNED_LP = '{default: unsigned'(SROW_LP)};
+	localparam arr2x3x4_t P_CONST_TERN = '{default: 1'b1 ? ROW_LP : P_ARR};
+	parameter arr3x4_t PARAM_ARR = '{default: 4'h3};
+	arr3x4_t c_cast;
+	spair_t c_spair_srow;
+	spair_t c_spair_urow;
+	sarr3x4_t [1:0] c_direct_spair;
+
+	function automatic arr3x4_t make_row();
+		return 12'h123;
+	endfunction
+
+	function automatic sarr3x4_t make_srow();
+		return 12'h123;
+	endfunction
+
+	typedef struct packed {
+		logic [2:0][3:0] arr;
+		logic            en;
+	} wrap_t;
+	typedef struct packed {
+		logic signed [2:0][3:0] sarr;
+		logic                   en;
+	} swrap_t;
+	typedef struct packed signed {
+		logic [3:0] a;
+		logic [3:0] b;
+	} sinner_t;
+	typedef struct packed {
+		sinner_t inner;
+		logic    tag;
+	} souter_t;
+	typedef struct packed {
+		logic [3:0] a;
+		logic [3:0] b;
+	} pair8_t;
+	typedef struct packed {
+		logic [3:0] x;
+		logic [3:0] y;
+	} other8_t;
+	localparam wrap_t P_WRAP = '{arr: '{default: 4'h6}, en: 1'b1};
+	localparam pair8_t P_PAIR = '{a: 4'hA, b: 4'h5};
+	// IEEE 1800-2017 10.9.2: a struct default does not recurse into packed-array members.
+	localparam wrap_t P_WRAP_DEF = '{default: 4'h5};
+	wrap_t c_struct;
+	wrap_t c_struct_sub;
+	swrap_t c_swrap;
+	swrap_t c_swrap_sub;
+	swrap_t c_swrap_123;
+	souter_t c_souter;
+	pair8_t [1:0] c_pair_arr;
+	pair8_t [1:0] c_pair_idx;
+	pair8_t [1:0] c_pair_nested;
+	pair8_t [1:0] c_pair_nested_idx;
+	pair8_t [1:0][2:0] c_pair_2d;
+	pair8_t [1:0][2:0] c_pair_2d_pos;
+	pair8_t [1:0][2:0] c_pair_2d_idx_pos;
+	pair8_t [1:0][1:0] c_pair_2x2_pos;
+	pair8_t [1:0][1:0] c_pair_2x2_slice;
+	pair8_t [1:0] c_pair_elem;
+	pair8_t [1:0] c_pair_scalar_def;
+	pair8_t [1:0] c_pair_idx_scalar;
+	pair8_t [1:0] c_pair_cast_def;
+	pair8_t [1:0][2:0] c_pair_2d_scalar;
+	pair8_t [2:0] pair_row;
+	other8_t [2:0] other_struct_row;
+	pair8_t [1:0][2:0] c_pair_2d_match_row;
+	pair8_t [1:0][2:0] c_pair_2d_other_row;
+	wrap_t  [1:0] c_wrap_scalar;
+	wrap_t        c_wrap_def;
+	swrap_t       c_swrap_def;
+	souter_t      c_souter_scalar;
+	logic [1:0][2:0][3:0] c3d_swrap_sarr;
+	logic [1:0][2:0][3:0] c3d_unsigned_srow;
+	logic [1:0][2:0][3:0] c3d_signed_row_cast;
+	logic [1:0][2:0][3:0] c3d_unsigned_row;
+	logic [1:0][2:0][3:0] c3d_dollar_unsigned_srow;
+	spair_t               c_spair_signed_cast;
+	spair_t               c_spair_dollar_signed;
+	pair8_t [1:0]         c_pair_unsigned_cast;
+	logic [3:0][7:0]      c2d_2ps;
+	wrap_t                c_struct_2ps;
+
+	// Struct default type matching uses type identity, not AST node identity:
+	// typedef'd struct members, member references, typedef aliases and anonymous
+	// nested struct types take a matching struct default whole.
+	typedef struct packed {
+		pair8_t p0;
+		pair8_t p1;
+	} quad8_t;
+	typedef pair8_t alias8_t;
+	typedef struct packed {
+		struct packed {
+			logic [3:0] a;
+			logic [3:0] b;
+		} s;
+		logic t;
+	} anon_wrap_t;
+	localparam quad8_t P_QUAD_DEF = '{default: P_PAIR};
+	localparam quad8_t P_QUAD_CAST = quad8_t'('{default: P_PAIR});
+	localparam arr2x3x4_t P_CAST_ROW = arr2x3x4_t'('{default: ROW_LP});
+	pair8_t            pair_val;
+	pair8_t            pair_val2;
+	alias8_t           alias_val;
+	other8_t           other_val;
+	quad8_t            quad_src;
+	alias8_t [2:0]     alias_row;
+	anon_wrap_t        anon_src;
+	quad8_t            c_quad_def;
+	quad8_t            c_quad_mref;
+	quad8_t            c_quad_alias;
+	quad8_t            c_quad_tern;
+	quad8_t            c_quad_other;
+	pair8_t [1:0]      c_pair_mref_def;
+	pair8_t [1:0]      c_pair_alias_def;
+	pair8_t [1:0][2:0] c_pair_2d_alias_row;
+	anon_wrap_t        c_anon_def;
+	// Cast operands are resolved before the pattern is elaborated against the cast type.
+	arr2x3x4_t         c_cast_def_row;
+	arr2x3x4_t         c_cast_idx_row;
+	arr2x3x4_t         c_cast_expr_row;
+	quad8_t            c_quad_cast;
+	quad8_t            c_quad_cast_mref;
+
+	always_comb begin
+		row          = 12'h123;
+		other_row    = 12'hABC;
+		row_42       = 12'h123;
+		row_asc      = 12'h123;
+		srow         = 12'h123;
+		srow_abc     = 12'hABC;
+		c2d          = '{default: 4'd5};
+		c3d          = '{default: 4'hA};
+		c3d_nested   = '{default: '{default: 4'hC}};
+		c_idx        = '{0: 4'h1, 2: 4'h3, default: 4'h5};
+		c_upto       = '{0: 4'h1, 2: 4'h3, default: 4'h5};
+		c1d          = '{default: 1'b1};
+		c_sub        = '{default: 4'h0};
+		c_sub[1]     = '{default: 4'h7};
+		c_cast       = arr3x4_t'('{default: 4'h9});
+		c_struct     = '{arr: '{default: 4'h6}, en: 1'b1};
+		c_struct_sub = '0;
+		c_struct_sub.arr[1] = '{default: 1'b1};
+		c_swrap      = '0;
+		c_swrap.sarr = '{default: 4'hA};
+		c_swrap_sub  = '0;
+		c_swrap_sub.sarr[1][2:1] = '{default: 1'b1};
+		c_swrap_123  = '{sarr: 12'h123, en: 1'b1};
+		c_souter     = '0;
+		c_souter.inner = '{a: 4'hA, b: 4'h5};
+		c_pair_arr   = '{default: P_PAIR};
+		c_pair_idx   = '{0: 8'h12, default: P_PAIR};
+		c_pair_nested     = '{default: '{a: 4'hA, b: 4'h5}};
+		c_pair_nested_idx = '{0: '{a: 4'h1, b: 4'h2}, default: '{a: 4'hA, b: 4'h5}};
+		c_pair_2d         = '{default: '{a: 4'hA, b: 4'h5}};
+		c_pair_2d_pos     = '{default: '{4'hA, 4'h5}};
+		c_pair_2d_idx_pos = '{0: '{default: '{4'h1, 4'h2}}, default: '{4'hA, 4'h5}};
+		c_pair_2x2_pos    = '{default: '{4'hA, 4'h5}};
+		c_pair_2x2_slice  = '{default: '{'{4'h1, 4'h2}, '{4'h3, 4'h4}}};
+		c_pair_elem       = '0;
+		c_pair_elem[1]    = '{a: 4'hA, b: 4'h5};
+		c_pair_scalar_def = '{default: 4'hA};
+		c_pair_idx_scalar = '{0: 8'h12, default: 4'hA};
+		c_pair_cast_def   = '{default: pair8_t'(8'hA5)};
+		c_pair_2d_scalar  = '{default: 4'hA};
+		pair_row            = 24'h123456;
+		other_struct_row    = 24'h123456;
+		c_pair_2d_match_row = '{default: pair_row};
+		c_pair_2d_other_row = '{default: other_struct_row};
+		c_wrap_scalar     = '{default: 4'h5};
+		c_wrap_def        = '{default: 4'h5};
+		c_swrap_def       = '{default: 4'h5};
+		c_souter_scalar   = '{default: 4'h5};
+		c3d_swrap_sarr = '{default: c_swrap_123.sarr};
+		c3d_unsigned_srow   = '{default: unsigned'(srow)};
+		c3d_signed_row_cast = '{default: signed'(row)};
+		c3d_unsigned_row         = '{default: unsigned'(row)};
+		c3d_dollar_unsigned_srow = '{default: $unsigned(srow)};
+		c_spair_signed_cast      = '{default: signed'(srow)};
+		c_spair_dollar_signed    = '{default: $signed(row)};
+		c_pair_unsigned_cast     = '{default: unsigned'(P_PAIR)};
+		c3d_row      = '{default: row};
+		c3d_idx_row  = '{0: other_row, default: row};
+		c3d_idx_leaf = '{0: other_row, default: 4'h5};
+		c4d_row      = '{default: row};
+		c3d_cast_row = '{default: arr3x4_t'(12'h123)};
+		c3d_lp_row   = '{default: ROW_LP};
+		c3d_idx_lp_row = '{0: other_row, default: ROW_LP};
+		c3d_fn_row   = '{default: make_row()};
+		c3d_idx_fn_row = '{0: other_row, default: make_row()};
+		c3d_tern_row = '{default: i[0] ? row : other_row};
+		c3d_idx_tern_row = '{0: row, default: i[0] ? other_row : ROW_LP};
+		c3d_p_arr    = '{default: P_ARR};
+		c3d_diff_bounds = '{default: row_42};
+		c3d_diff_dir    = '{default: row_asc};
+		c3d_signed_row  = '{default: srow};
+		c3d_signed_cast = '{default: sarr3x4_t'(12'h123)};
+		c3d_signed_lp   = '{default: SROW_LP};
+		c3d_signed_fn   = '{default: make_srow()};
+		c3d_mixed_tern  = '{default: i[0] ? row : srow_abc};
+		sc3d_row        = '{default: row};
+		sc3d_srow       = '{default: srow};
+		c_spair_srow    = '{default: srow};
+		c_spair_urow    = '{default: row};
+		c_direct_spair  = '{default: srow};
+		c2d_bit_def  = '{default: 1'b1};
+		c2d_idx_bit_def = '{0: 4'hA, default: 1'b1};
+		c3d_bit_def  = '{default: 1'b1};
+		v_ps         = 8'h00;
+		v_ps[3:0]    = '{default: 1'b1};
+		v_ps_idx     = 8'hFF;
+		v_ps_idx[5:2] = '{5: 1'b1, default: 1'b0};
+		c2d_ps       = 12'h000;
+		c2d_ps[1][2:1] = '{default: 1'b1};
+		c2d_outer_ps = 12'h000;
+		c2d_outer_ps[2:1] = '{default: 4'h7};
+		c2d_ps_idx   = 12'h000;
+		c2d_ps_idx[1][2:1] = '{2: 1'b1, default: 1'b0};
+		c2d_outer_idx = 12'h000;
+		c2d_outer_idx[2:1] = '{2: 4'hA, default: 4'h7};
+		c2d_2ps = '0;
+		c2d_2ps[2:1][5:2] = '{default: 1'b1};
+		c_struct_2ps = '0;
+		c_struct_2ps.arr[2:1][2:1] = '{default: 1'b1};
+		pair_val     = 8'hA5;
+		pair_val2    = 8'h3C;
+		alias_val    = 8'h96;
+		other_val    = 8'h5A;
+		quad_src     = 16'h1234;
+		alias_row    = 24'h123456;
+		anon_src     = {8'hA5, 1'b0};
+		c_quad_def   = '{default: pair_val};
+		c_quad_mref  = '{default: quad_src.p1};
+		c_quad_alias = '{default: alias_val};
+		c_quad_tern  = '{default: i[0] ? pair_val : pair_val2};
+		c_quad_other = '{default: other_val};
+		c_pair_mref_def     = '{default: quad_src.p0};
+		c_pair_alias_def    = '{default: alias_val};
+		c_pair_2d_alias_row = '{default: alias_row};
+		c_anon_def       = '{default: anon_src.s};
+		c_cast_def_row   = arr2x3x4_t'('{default: row});
+		c_cast_idx_row   = arr2x3x4_t'('{0: other_row, default: row});
+		c_cast_expr_row  = arr2x3x4_t'('{default: row}) ^ 24'h0;
+		c_quad_cast      = quad8_t'('{default: pair_val});
+		c_quad_cast_mref = quad8_t'('{default: quad_src.p1});
+	end
+
+	always_comb assert(c2d == {4'd5, 4'd5, 4'd5});
+	always_comb assert(c3d == {6{4'hA}});
+	always_comb assert(c3d_nested == {6{4'hC}});
+	always_comb assert(c_idx[2] == 4'h3 && c_idx[1] == 4'h5 && c_idx[0] == 4'h1);
+	always_comb assert(c_upto[0] == 4'h1 && c_upto[1] == 4'h5 && c_upto[2] == 4'h3);
+	always_comb assert(c1d == 8'hFF);
+	always_comb assert(c_sub[1] == {3{4'h7}} && c_sub[0] == 12'h000);
+	always_comb assert(c_cast == {3{4'h9}});
+	always_comb assert(c_struct.arr == {3{4'h6}} && c_struct.en == 1'b1);
+	always_comb assert(c_struct_sub.arr == 12'h0F0 && c_struct_sub.en == 1'b0);
+	always_comb assert(c_swrap.sarr == 12'shAAA && c_swrap.en == 1'b0);
+	always_comb assert(c_swrap_sub.sarr == 12'sh060 && c_swrap_sub.en == 1'b0);
+	always_comb assert(c_souter.inner == 8'shA5 && c_souter.tag == 1'b0);
+	always_comb assert(P_PAIR == 8'hA5 && c_pair_arr == 16'hA5A5 && c_pair_idx == 16'hA512);
+	always_comb assert(c_pair_nested == 16'hA5A5 && c_pair_nested_idx == 16'hA512);
+	always_comb assert(c_pair_2d == {6{8'hA5}} && c_pair_elem == 16'hA500);
+	always_comb assert(c_pair_2d_pos == {6{8'hA5}} && c_pair_2d_idx_pos == {{3{8'hA5}}, {3{8'h12}}});
+	always_comb assert(c_pair_2x2_pos == {4{8'hA5}} && c_pair_2x2_slice == {2{8'h12, 8'h34}});
+	always_comb assert(c_pair_scalar_def == 16'hAAAA && c_pair_idx_scalar == 16'hAA12);
+	always_comb assert(c_pair_cast_def == 16'hA5A5 && c_pair_2d_scalar == {6{8'hAA}});
+	always_comb assert(c_pair_2d_match_row == {2{24'h123456}} && c_pair_2d_other_row == {6{8'h66}});
+	// Struct defaults recurse into struct members (inner) but cast into packed-array members (arr/sarr).
+	always_comb assert(c_wrap_scalar == {2{12'h005, 1'b1}} && c_souter_scalar == {8'h55, 1'b1});
+	always_comb assert(c_wrap_def.arr == 12'h005 && c_wrap_def.en == 1'b1 && P_WRAP_DEF == {12'h005, 1'b1});
+	always_comb assert(c_swrap_def.sarr == 12'sh005 && c_swrap_def.en == 1'b1);
+	always_comb assert(c3d_swrap_sarr == 24'h333333);
+	// Signing casts yield a plain [n-1:0] vector (IEEE 1800-2017 6.24.1): they never match a
+	// multidimensional packed subarray or a struct element, so the default recurses to the leaves.
+	always_comb assert(c3d_unsigned_srow == 24'h333333);
+	always_comb assert(c3d_signed_row_cast == 24'h333333);
+	always_comb assert(c3d_unsigned_row == 24'h333333 && c3d_dollar_unsigned_srow == 24'h333333);
+	always_comb assert(c_spair_signed_cast == 24'h333333 && c_spair_dollar_signed == 24'h333333);
+	always_comb assert(c_pair_unsigned_cast == 16'h5555);
+	always_comb assert(c3d_row == {12'h123, 12'h123});
+	always_comb assert(c3d_idx_row == {12'h123, 12'hABC});
+	always_comb assert(c3d_idx_leaf == {12'h555, 12'hABC});
+	always_comb assert(c4d_row == {4{12'h123}});
+	always_comb assert(c3d_cast_row == {12'h123, 12'h123});
+	always_comb assert(c3d_lp_row == {12'h123, 12'h123});
+	always_comb assert(c3d_idx_lp_row == {12'h123, 12'hABC});
+	always_comb assert(c3d_fn_row == {12'h123, 12'h123});
+	always_comb assert(c3d_idx_fn_row == {12'h123, 12'hABC});
+	always_comb assert(c3d_tern_row === (i[0] ? {12'h123, 12'h123} : {12'hABC, 12'hABC}));
+	always_comb assert(c3d_idx_tern_row === (i[0] ? {12'hABC, 12'h123} : {12'h123, 12'h123}));
+	always_comb assert(P_ARR == 12'hAAA);
+	always_comb assert(P_ARR_IDX == 12'h551);
+	always_comb assert(P_VEC == 8'hFF);
+	always_comb assert(P_3D_SUB == 24'hAAAAAA);
+	always_comb assert(P_UNSIGNED_LP == 24'h333333);
+	always_comb assert(P_CONST_TERN == 24'h123123);
+	always_comb assert(PARAM_ARR == 12'h333);
+	always_comb assert(P_WRAP == {12'h666, 1'b1});
+	always_comb assert(c3d_p_arr == 24'hAAAAAA);
+	always_comb assert(c3d_diff_bounds == 24'h333333);
+	always_comb assert(c3d_diff_dir == 24'h333333);
+	always_comb assert(c3d_signed_row == 24'h333333);
+	always_comb assert(c3d_signed_cast == 24'h333333);
+	always_comb assert(c3d_signed_lp == 24'h333333);
+	always_comb assert(c3d_signed_fn == 24'h333333);
+	always_comb assert(c3d_mixed_tern === (i[0] ? 24'h333333 : 24'hCCCCCC));
+	always_comb assert(sc3d_row == 24'h123123);
+	always_comb assert(sc3d_srow == 24'h333333);
+	always_comb assert(c_spair_srow == 24'h123123);
+	always_comb assert(c_spair_urow == 24'h333333);
+	always_comb assert(c_direct_spair == 24'h123123);
+	always_comb assert(c2d_bit_def == 8'h11);
+	always_comb assert(c2d_idx_bit_def == 8'h1A);
+	always_comb assert(c3d_bit_def == 24'h111111);
+	always_comb assert(v_ps == 8'h0F);
+	always_comb assert(v_ps_idx == 8'b1110_0011);
+	always_comb assert(c2d_ps == 12'h060);
+	always_comb assert(c2d_outer_ps == 12'h770);
+	always_comb assert(c2d_ps_idx == 12'h040);
+	always_comb assert(c2d_outer_idx == 12'hA70);
+	always_comb assert(c2d_2ps[1][5:2] == 4'h1);
+	always_comb assert(c_struct_2ps.arr[1][2:1] == 2'b01);
+	// A struct default matching a member's or element's struct type is assigned whole;
+	// a different struct type (other8_t) still recurses to the leaf members.
+	always_comb assert(c_quad_def == 16'hA5A5 && c_quad_mref == 16'h3434 && c_quad_alias == 16'h9696);
+	always_comb assert(c_quad_tern === (i[0] ? 16'hA5A5 : 16'h3C3C));
+	always_comb assert(c_quad_other == 16'hAAAA);
+	always_comb assert(c_pair_mref_def == 16'h1212 && c_pair_alias_def == 16'h9696);
+	always_comb assert(c_pair_2d_alias_row == {2{24'h123456}});
+	always_comb assert(c_anon_def == {8'hA5, 1'b1});
+	always_comb assert(P_QUAD_DEF == 16'hA5A5 && P_QUAD_CAST == 16'hA5A5);
+	always_comb assert(P_CAST_ROW == 24'h123123);
+	always_comb assert(c_cast_def_row == {12'h123, 12'h123} && c_cast_idx_row == {12'h123, 12'hABC});
+	always_comb assert(c_cast_expr_row == 24'h123123);
+	always_comb assert(c_quad_cast == 16'hA5A5 && c_quad_cast_mref == 16'h3434);
+endmodule

@@ -1488,46 +1488,242 @@ static void collect_scope_members(const std::string &prefix, std::vector<AstNode
 	}
 }
 
-// Packed struct or union members of an assignment target. Typedef instances are
-// recovered from the wiretype attribute; anonymous structs from the member scope
-// entries created when the struct was packed.
-static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
+static RTLIL::IdString cast_type_struct_attr()
+{
+	static RTLIL::IdString attr = intern_attr_name("\\sv_cast_struct_type");
+	return attr;
+}
+
+static AstNode *struct_elem_type_for_decl(AstNode *decl)
+{
+	AstNode *cur = decl;
+	std::set<std::string> visited;
+	while (cur) {
+		auto it = cur->attributes.find(cast_type_struct_attr());
+		if (it == cur->attributes.end() || !it->second)
+			it = cur->attributes.find(ID::wiretype);
+		if (it == cur->attributes.end() || !it->second)
+			break;
+		std::string tname = it->second->str;
+		if (tname.empty() && it->second->is_string)
+			tname = it->second->bitsAsConst().decode_string();
+		if (!tname.empty() && tname[0] != '\\')
+			tname = "\\" + tname;
+		if (tname.empty() || !visited.insert(tname).second || !current_scope.count(tname))
+			break;
+		AstNode *td = current_scope.at(tname);
+		if (td->type != AST_TYPEDEF || td->children.size() != 1)
+			break;
+		AstNode *tmpl = td->children[0].get();
+		if (tmpl->type == AST_STRUCT || tmpl->type == AST_UNION) {
+			if (!tmpl->range_valid)
+				size_packed_struct(tmpl, 0);
+			return tmpl;
+		}
+		cur = tmpl;
+	}
+	return nullptr;
+}
+
+// Typedef'd struct members, typedef aliases (typedef pair_t alias_t) and the
+// wiretype copies on struct member references are clones of the declaring
+// struct/union. Clones of a typedef carry its name in their wiretype attribute;
+// follow those names to the template of the typedef that declares the type.
+static AstNode *canonical_struct_type(AstNode *stype)
+{
+	std::set<std::string> visited;
+	while (stype) {
+		auto it = stype->attributes.find(ID::wiretype);
+		if (it == stype->attributes.end() || !it->second)
+			break;
+		std::string tname = it->second->str;
+		if (tname.empty() && it->second->is_string)
+			tname = it->second->bitsAsConst().decode_string();
+		if (!tname.empty() && tname[0] != '\\')
+			tname = "\\" + tname;
+		if (tname.empty() || !visited.insert(tname).second || !current_scope.count(tname))
+			break;
+		AstNode *td = current_scope.at(tname);
+		if (td->type != AST_TYPEDEF || td->children.size() != 1)
+			break;
+		AstNode *tmpl = td->children[0].get();
+		if (tmpl->type != AST_STRUCT && tmpl->type != AST_UNION)
+			break;
+		stype = tmpl;
+	}
+	return stype;
+}
+
+static bool same_source_location(const AstNode *a, const AstNode *b)
+{
+	const auto &la = a->location, &lb = b->location;
+	if (!la.begin.filename || !lb.begin.filename || *la.begin.filename != *lb.begin.filename)
+		return false;
+	return la.begin.line == lb.begin.line && la.begin.column == lb.begin.column &&
+			la.end.line == lb.end.line && la.end.column == lb.end.column;
+}
+
+// Whether two struct/union type nodes denote the same type (IEEE 1800-2017
+// 6.22.1): the same typedef, possibly through aliases, or clones of the same
+// anonymous struct/union declaration. Type nodes are routinely cloned, so they
+// cannot be compared by pointer.
+static bool same_struct_type(AstNode *a, AstNode *b)
+{
+	if (a == b)
+		return true;
+	if (!a || !b)
+		return false;
+	a = canonical_struct_type(a);
+	b = canonical_struct_type(b);
+	if (a == b)
+		return true;
+	return a->type == b->type && a->is_signed == b->is_signed && same_source_location(a, b) &&
+			a->range_valid && b->range_valid && a->range_left - a->range_right == b->range_left - b->range_right;
+}
+
+static bool decl_is_array(AstNode *decl)
+{
+	if (!decl)
+		return false;
+	if (decl->unpacked_dimensions > 0 || GetSize(decl->dimensions) > 1)
+		return true;
+	for (auto &c : decl->children)
+		if (c->type == AST_MULTIRANGE)
+			return true;
+	return false;
+}
+
+static std::vector<AstNode*> members_for_decl(AstNode *decl)
 {
 	std::vector<AstNode*> members;
-	AstNode *wire = lhs->id2ast;
+	if (!decl || decl_is_array(decl))
+		return members;
 	AstNode *stype = nullptr;
-	if (AstNode *member = lhs->get_struct_member()) {
-		if (member->type == AST_STRUCT || member->type == AST_UNION)
-			stype = member;
-	}
-	if (!stype && wire && (wire->type == AST_STRUCT || wire->type == AST_UNION))
-		stype = wire;
-	else if (!stype && wire) {
-		if (AstNode *member = wire->get_struct_member()) {
+	if (decl->type == AST_STRUCT || decl->type == AST_UNION)
+		stype = decl;
+	else {
+		if (AstNode *member = decl->get_struct_member()) {
 			if (member->type == AST_STRUCT || member->type == AST_UNION)
 				stype = member;
 		}
-		if (!stype) {
-			auto it = wire->attributes.find(ID::wiretype);
-			if (it != wire->attributes.end() && it->second) {
-				std::string tname = it->second->str;
-				if (tname.empty() && it->second->is_string)
-					tname = it->second->bitsAsConst().decode_string();
-				if (!tname.empty() && tname[0] != '\\')
-					tname = "\\" + tname;
-				if (!tname.empty() && current_scope.count(tname)) {
-					AstNode *td = current_scope.at(tname);
-					if (td->type == AST_TYPEDEF && td->children.size() == 1 &&
-							(td->children[0]->type == AST_STRUCT || td->children[0]->type == AST_UNION))
-						stype = td->children[0].get();
-				}
-			}
-		}
+		if (!stype)
+			stype = struct_elem_type_for_decl(decl);
 	}
 	if (stype && !stype->range_valid && (stype->type == AST_STRUCT || stype->type == AST_UNION))
 		size_packed_struct(stype, 0);
 	if (stype)
 		collect_struct_members(stype, members);
+	if (members.empty())
+		collect_scope_members(decl->str, members);
+	return members;
+}
+
+static AstNode *unwrap_signed_member_target(AstNode *lhs)
+{
+	while ((lhs->type == AST_TO_SIGNED || lhs->type == AST_TO_UNSIGNED) && lhs->children.size() == 1)
+		lhs = lhs->children[0].get();
+	return lhs;
+}
+
+// A reference to a signed packed struct member is rewritten into an identifier
+// wrapped in AST_TO_SIGNED (see the struct member rewrite in simplify() and
+// struct_array_field_select()). That wrapper keeps the member's declared type.
+// Any other AST_TO_SIGNED/AST_TO_UNSIGNED is a signing cast (signed'(x),
+// unsigned'(x), $signed(x), $unsigned(x)), whose result IEEE 1800-2017 6.24.1
+// defines as a simple vector with a single [n-1:0] packed dimension.
+static bool is_signed_member_ref(AstNode *node)
+{
+	if (node->type != AST_TO_SIGNED || node->children.size() != 1)
+		return false;
+	AstNode *ref = node->children[0].get();
+	if (ref->type != AST_IDENTIFIER)
+		return false;
+	if (AstNode *member = ref->get_struct_member())
+		return member->is_signed;
+	auto it = ref->attributes.find(struct_array_member_attr());
+	return it != ref->attributes.end() && it->second && it->second->is_signed &&
+			!ref->attributes.count(struct_array_member_width_attr());
+}
+
+static AstNode *indexed_struct_elem_type(AstNode *lhs)
+{
+	if (lhs->type != AST_IDENTIFIER || !lhs->id2ast || !lhs->basic_prep || lhs->integer == 0)
+		return nullptr;
+	AstNode *decl = lhs->id2ast;
+	if (!decl_is_array(decl) || GetSize(decl->dimensions) < 2)
+		return nullptr;
+	if ((int)lhs->integer != GetSize(decl->dimensions) - 1)
+		return nullptr;
+	AstNode *stype = struct_elem_type_for_decl(decl);
+	if (!stype)
+		return nullptr;
+	int width = -1;
+	bool sign = true;
+	lhs->detectSignWidth(width, sign);
+	return width == packed_member_width(stype) ? stype : nullptr;
+}
+
+static AstNode *struct_type_for_expr(AstNode *expr)
+{
+	if (!expr)
+		return nullptr;
+	if (expr->type == AST_SELFSZ && expr->children.size() == 1)
+		return struct_type_for_expr(expr->children[0].get());
+	if ((expr->type == AST_TO_SIGNED || expr->type == AST_TO_UNSIGNED) && expr->children.size() == 1) {
+		// A signing cast yields a plain [n-1:0] vector, not the operand's struct type.
+		if (!is_signed_member_ref(expr))
+			return nullptr;
+		return struct_type_for_expr(expr->children[0].get());
+	}
+	if (expr->type == AST_TERNARY && expr->children.size() == 3) {
+		AstNode *t_st = struct_type_for_expr(expr->children[1].get());
+		AstNode *f_st = struct_type_for_expr(expr->children[2].get());
+		return (t_st && same_struct_type(t_st, f_st)) ? t_st : nullptr;
+	}
+	if (expr->type == AST_IDENTIFIER && expr->id2ast) {
+		if (AstNode *member = expr->get_struct_member()) {
+			if (member->type == AST_STRUCT || member->type == AST_UNION) {
+				int w = -1;
+				bool s = false;
+				expr->detectSignWidth(w, s);
+				return w == packed_member_width(member) ? member : nullptr;
+			}
+			return nullptr;
+		}
+		if (AstNode *es = indexed_struct_elem_type(expr))
+			return es;
+		if (expr->children.empty() && !decl_is_array(expr->id2ast))
+			return struct_elem_type_for_decl(expr->id2ast);
+		return nullptr;
+	}
+	if (expr->attributes.count(cast_type_struct_attr()))
+		return struct_elem_type_for_decl(expr);
+	return nullptr;
+}
+
+// Packed struct or union members of an assignment target. Typedef instances are
+// recovered from the wiretype attribute; anonymous structs from the member scope
+// entries created when the struct was packed.
+static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
+{
+	lhs = unwrap_signed_member_target(lhs);
+	std::vector<AstNode*> members;
+	if (AstNode *member = lhs->get_struct_member()) {
+		if (member->type == AST_STRUCT || member->type == AST_UNION) {
+			if (!member->range_valid)
+				size_packed_struct(member, 0);
+			collect_struct_members(member, members);
+			if (!members.empty())
+				return members;
+		}
+	}
+	if (AstNode *elem_stype = indexed_struct_elem_type(lhs)) {
+		collect_struct_members(elem_stype, members);
+		return members;
+	}
+	if (decl_is_array(lhs->id2ast))
+		return members;
+	members = members_for_decl(lhs->id2ast);
 	if (members.empty())
 		collect_scope_members(lhs->str, members);
 	return members;
@@ -1535,9 +1731,12 @@ static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
 
 static bool is_whole_struct_pattern_target(AstNode *lhs)
 {
+	lhs = unwrap_signed_member_target(lhs);
 	if (lhs->type != AST_IDENTIFIER)
 		return false;
 	if (lhs->children.empty())
+		return !decl_is_array(lhs->id2ast);
+	if (indexed_struct_elem_type(lhs))
 		return true;
 
 	AstNode *member = lhs->get_struct_member();
@@ -1555,16 +1754,605 @@ static std::unique_ptr<AstNode> cast_to_width(AstSrcLocType loc, int width, std:
 	return std::make_unique<AstNode>(loc, AST_CAST_SIZE, AstNode::mkconst_int(loc, width, false), std::move(value));
 }
 
+static bool assignment_pattern_has_index_key(AstNode *pattern)
+{
+	if (pattern->type != AST_ASSIGN_PATTERN)
+		return false;
+	for (auto &child : pattern->children) {
+		if (child->attributes.count(pattern_index_attr()))
+			return true;
+	}
+	return false;
+}
+
+static RTLIL::IdString packed_part_range_attr()
+{
+	static RTLIL::IdString attr = intern_attr_name("\\sv_packed_part_range");
+	return attr;
+}
+
+static RTLIL::IdString cast_type_dims_attr()
+{
+	static RTLIL::IdString attr = intern_attr_name("\\sv_cast_type_dims");
+	return attr;
+}
+
+static std::vector<AstNode::dimension_t> slice_packed_dims(const std::vector<AstNode::dimension_t> &decl_dims,
+		int unpacked_dims, int idx_dims, int lhs_width, AstNode *lhs)
+{
+	if (decl_dims.empty() || idx_dims < unpacked_dims)
+		return {};
+
+	auto slice_it = lhs->attributes.find(packed_slice_dims_attr());
+	if (slice_it != lhs->attributes.end() && slice_it->second->type == AST_MULTIRANGE && !slice_it->second->children.empty()) {
+		std::vector<AstNode::dimension_t> sdims;
+		int dyn_idx = -1;
+		int known_prod = 1;
+		bool ok = true;
+		for (int i = 0; i < GetSize(slice_it->second->children); i++) {
+			AstNode *r = slice_it->second->children[i].get();
+			if (r->type != AST_RANGE) {
+				ok = false;
+				break;
+			}
+			if (r->integer != 0) {
+				if (dyn_idx >= 0) {
+					ok = false;
+					break;
+				}
+				dyn_idx = i;
+				sdims.push_back({0, 1, false});
+			} else if (r->range_valid) {
+				int w = r->range_left - r->range_right + 1;
+				if (w <= 0) {
+					ok = false;
+					break;
+				}
+				known_prod *= w;
+				sdims.push_back({r->range_right, w, r->range_swapped});
+			} else {
+				ok = false;
+				break;
+			}
+		}
+		if (ok) {
+			if (dyn_idx >= 0) {
+				if (known_prod > 0 && lhs_width > 0 && lhs_width % known_prod == 0)
+					sdims[dyn_idx].range_width = lhs_width / known_prod;
+				else
+					ok = false;
+			}
+			if (ok)
+				return sdims;
+		}
+	}
+
+	auto part_range_dim = [&]() -> std::pair<bool, AstNode::dimension_t> {
+		auto it = lhs->attributes.find(packed_part_range_attr());
+		if (it != lhs->attributes.end() && it->second->type == AST_RANGE && it->second->range_valid) {
+			AstNode *r = it->second.get();
+			return {true, {r->range_right, r->range_left - r->range_right + 1, r->range_swapped}};
+		}
+		return {false, {0, 0, false}};
+	};
+
+	if (idx_dims == GetSize(decl_dims)) {
+		auto pr = part_range_dim();
+		if (pr.first && pr.second.range_width == lhs_width)
+			return {pr.second};
+		if (!lhs->children.empty()) {
+			AstNode *sel = lhs->children.back().get();
+			if (sel->type == AST_RANGE && sel->children.size() == 2) {
+				bool single_packed_dim = (GetSize(decl_dims) - unpacked_dims) == 1;
+				if (single_packed_dim && sel->range_valid)
+					return {{sel->range_right, lhs_width, sel->range_swapped}};
+				if (lhs_width > 1 || (sel->range_valid && sel->range_left == sel->range_right))
+					return {{0, lhs_width, false}};
+			}
+		}
+		return {};
+	}
+
+	if (idx_dims > GetSize(decl_dims))
+		return {};
+
+	std::vector<AstNode::dimension_t> dims(decl_dims.begin() + idx_dims, decl_dims.end());
+	int total = 1;
+	for (const auto &d : dims)
+		total *= d.range_width;
+	if (total != lhs_width) {
+		if (idx_dims > unpacked_dims && total > 0 && lhs_width > total && lhs_width % total == 0) {
+			auto pr = part_range_dim();
+			if (pr.first && pr.second.range_width == lhs_width / total)
+				dims.insert(dims.begin(), pr.second);
+			else
+				dims.insert(dims.begin(), {0, lhs_width / total, false});
+			return dims;
+		}
+		return {};
+	}
+	return dims;
+}
+
+static std::unique_ptr<AstNode> make_dims_multirange(AstSrcLocType loc, const std::vector<AstNode::dimension_t> &dims, bool is_signed = false, AstNode *struct_attr_src = nullptr)
+{
+	auto mr = std::make_unique<AstNode>(loc, AST_MULTIRANGE);
+	mr->is_signed = is_signed;
+	if (struct_attr_src && struct_elem_type_for_decl(struct_attr_src)) {
+		auto it = struct_attr_src->attributes.find(cast_type_struct_attr());
+		if (it == struct_attr_src->attributes.end())
+			it = struct_attr_src->attributes.find(ID::wiretype);
+		if (it != struct_attr_src->attributes.end() && it->second)
+			mr->set_attribute(cast_type_struct_attr(), it->second->clone());
+	}
+	for (const auto &d : dims) {
+		int low_b = d.range_right;
+		int high_b = low_b + d.range_width - 1;
+		int l = d.range_swapped ? low_b : high_b;
+		int r = d.range_swapped ? high_b : low_b;
+		auto rn = make_range(loc, l, r);
+		rn->range_valid = true;
+		rn->range_left = high_b;
+		rn->range_right = low_b;
+		rn->range_swapped = d.range_swapped;
+		mr->children.push_back(std::move(rn));
+	}
+	return mr;
+}
+
+static int signed_subarray_len_for_decl(AstNode *decl)
+{
+	AstNode *cur = decl;
+	int result = -1;
+	std::set<std::string> visited;
+	while (cur) {
+		auto it = cur->attributes.find(ID::wiretype);
+		if (it == cur->attributes.end() || !it->second)
+			break;
+		std::string tname = it->second->str;
+		if (tname.empty() && it->second->is_string)
+			tname = it->second->bitsAsConst().decode_string();
+		if (!tname.empty() && tname[0] != '\\')
+			tname = "\\" + tname;
+		if (tname.empty() || !visited.insert(tname).second || !current_scope.count(tname))
+			break;
+		AstNode *td = current_scope.at(tname);
+		if (td->type != AST_TYPEDEF || td->children.size() != 1)
+			break;
+		AstNode *tmpl = td->children[0].get();
+		if (tmpl->is_signed && tmpl->unpacked_dimensions == 0)
+			result = GetSize(tmpl->dimensions) >= 2 ? GetSize(tmpl->dimensions) : -1;
+		cur = tmpl;
+	}
+	return result;
+}
+
+static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs, bool *out_signed = nullptr, int *out_signed_sub_len = nullptr, AstNode **out_elem_stype = nullptr)
+{
+	if (out_signed)
+		*out_signed = false;
+	if (out_signed_sub_len)
+		*out_signed_sub_len = -1;
+	if (out_elem_stype)
+		*out_elem_stype = nullptr;
+
+	auto cast_it = lhs->attributes.find(cast_type_dims_attr());
+	if (cast_it != lhs->attributes.end() && cast_it->second->type == AST_MULTIRANGE && !cast_it->second->children.empty()) {
+		std::vector<AstNode::dimension_t> dims;
+		for (auto &r : cast_it->second->children) {
+			if (r->type != AST_RANGE || !r->range_valid)
+				return {};
+			dims.push_back({r->range_right, r->range_left - r->range_right + 1, r->range_swapped});
+		}
+		if (out_signed)
+			*out_signed = cast_it->second->is_signed;
+		if (out_elem_stype && GetSize(dims) >= 2)
+			*out_elem_stype = struct_elem_type_for_decl(cast_it->second.get());
+		return dims;
+	}
+
+	if (lhs->type == AST_SELFSZ && lhs->children.size() == 1)
+		return packed_dims_for_lhs(lhs->children[0].get(), out_signed, out_signed_sub_len, out_elem_stype);
+
+	if ((lhs->type == AST_TO_SIGNED || lhs->type == AST_TO_UNSIGNED) && lhs->children.size() == 1) {
+		if (!is_signed_member_ref(lhs)) {
+			// signed'(x), unsigned'(x), $signed(x) and $unsigned(x) do not keep the
+			// operand's packed array shape: the result has a single [n-1:0] dimension
+			// with the cast's signedness (IEEE 1800-2017 6.24.1).
+			auto operand_dims = packed_dims_for_lhs(lhs->children[0].get());
+			if (operand_dims.empty())
+				return {};
+			int width = 1;
+			for (const auto &d : operand_dims)
+				width *= d.range_width;
+			if (out_signed)
+				*out_signed = (lhs->type == AST_TO_SIGNED);
+			return {{0, width, false}};
+		}
+		auto dims = packed_dims_for_lhs(lhs->children[0].get(), out_signed, out_signed_sub_len, out_elem_stype);
+		if (!dims.empty() && out_signed) {
+			bool sliced_struct_member = (lhs->type == AST_TO_SIGNED && lhs->children[0]->type == AST_IDENTIFIER &&
+					lhs->children[0]->get_struct_member() && lhs->children[0]->integer > 0);
+			if (!sliced_struct_member)
+				*out_signed = (lhs->type == AST_TO_SIGNED);
+		}
+		return dims;
+	}
+
+	if (lhs->type == AST_TERNARY && lhs->children.size() == 3) {
+		bool t_signed = false, f_signed = false;
+		AstNode *t_stype = nullptr, *f_stype = nullptr;
+		auto t_dims = packed_dims_for_lhs(lhs->children[1].get(), &t_signed, nullptr, &t_stype);
+		auto f_dims = packed_dims_for_lhs(lhs->children[2].get(), &f_signed, nullptr, &f_stype);
+		if (!t_dims.empty() && t_dims.size() == f_dims.size() && t_signed == f_signed && same_struct_type(t_stype, f_stype)) {
+			bool same = true;
+			for (size_t i = 0; i < t_dims.size(); i++) {
+				if (t_dims[i].range_right != f_dims[i].range_right ||
+						t_dims[i].range_width != f_dims[i].range_width ||
+						t_dims[i].range_swapped != f_dims[i].range_swapped) {
+					same = false;
+					break;
+				}
+			}
+			if (same) {
+				if (out_signed)
+					*out_signed = t_signed;
+				if (out_elem_stype)
+					*out_elem_stype = t_stype;
+				return t_dims;
+			}
+		}
+		return {};
+	}
+
+	if (lhs->type != AST_IDENTIFIER || lhs->id2ast == nullptr)
+		return {};
+
+	int lhs_width = -1;
+	bool lhs_sign = true;
+	lhs->detectSignWidth(lhs_width, lhs_sign);
+	if (lhs_width <= 0)
+		return {};
+
+	if (AstNode *member = lhs->get_struct_member()) {
+		if (member->type == AST_STRUCT_ITEM && !member->dimensions.empty()) {
+			auto res = slice_packed_dims(member->dimensions, 0, (int)lhs->integer, lhs_width, lhs);
+			if (!res.empty()) {
+				int sub_len = signed_subarray_len_for_decl(member);
+				bool is_part_slice = lhs->attributes.count(packed_slice_dims_attr()) > 0;
+				if (out_signed)
+					*out_signed = (lhs->integer == 0) ? member->is_signed : (!is_part_slice && GetSize(res) == sub_len);
+				if (out_signed_sub_len)
+					*out_signed_sub_len = sub_len;
+				if (out_elem_stype && GetSize(res) >= 2 && (int)lhs->integer < GetSize(member->dimensions))
+					*out_elem_stype = struct_elem_type_for_decl(member);
+			}
+			return res;
+		}
+		return {};
+	}
+
+	AstNode *decl = lhs->id2ast;
+	if (decl->type != AST_WIRE && decl->type != AST_MEMORY &&
+			decl->type != AST_PARAMETER && decl->type != AST_LOCALPARAM)
+		return {};
+	if (decl->dimensions.empty())
+		return {};
+
+	int idx_dims = -1;
+	if (lhs->children.empty()) {
+		if (decl->unpacked_dimensions != 0)
+			return {};
+		idx_dims = 0;
+	} else if (lhs->basic_prep && lhs->integer > 0) {
+		idx_dims = (int)lhs->integer;
+	}
+
+	if (idx_dims < 0)
+		return {};
+
+	auto res = slice_packed_dims(decl->dimensions, decl->unpacked_dimensions, idx_dims, lhs_width, lhs);
+	if (!res.empty()) {
+		int sub_len = signed_subarray_len_for_decl(decl);
+		bool is_part_slice = lhs->attributes.count(packed_slice_dims_attr()) > 0;
+		if (out_signed)
+			*out_signed = (idx_dims == 0 && lhs->children.empty()) ? decl->is_signed : (!is_part_slice && GetSize(res) == sub_len);
+		if (out_signed_sub_len)
+			*out_signed_sub_len = sub_len;
+		if (out_elem_stype && GetSize(res) >= 2 && idx_dims < GetSize(decl->dimensions))
+			*out_elem_stype = struct_elem_type_for_decl(decl);
+	}
+	return res;
+}
+
 static std::unique_ptr<AstNode> elaborate_named_pattern(AstNode *pattern, const std::vector<AstNode*> &members);
 static std::unique_ptr<AstNode> elaborate_positional_pattern(AstNode *pattern, const std::vector<AstNode*> &members);
 
+static std::unique_ptr<AstNode> elaborate_packed_array_pattern(AstNode *pattern, const std::vector<AstNode::dimension_t> &dims, int dim_idx, int target_signed_sub_len = -1, AstNode *elem_stype = nullptr)
+{
+	log_assert(pattern->type == AST_ASSIGN_PATTERN);
+	log_assert(dim_idx >= 0 && dim_idx < GetSize(dims));
+
+	auto strip_pattern_attrs = [](AstNode *elem) {
+		auto val = elem->clone();
+		val->attributes.erase(pattern_member_attr());
+		val->attributes.erase(pattern_default_attr());
+		val->attributes.erase(pattern_index_attr());
+		return val;
+	};
+
+	auto pattern_has_member_key = [](AstNode *pat) {
+		for (auto &c : pat->children)
+			if (c->attributes.count(pattern_member_attr()))
+				return true;
+		return false;
+	};
+
+	auto is_struct_element_pattern = [&](AstNode *pat, int next_dim) -> bool {
+		if (!elem_stype)
+			return false;
+		if (next_dim == GetSize(dims) - 1)
+			return true;
+		if (pattern_has_member_key(pat))
+			return true;
+		if (!assignment_pattern_is_named(pat) && !assignment_pattern_has_index_key(pat) &&
+				elem_stype->type == AST_STRUCT) {
+			std::vector<AstNode*> members;
+			collect_struct_members(elem_stype, members);
+			if (GetSize(pat->children) != GetSize(members))
+				return false;
+			if (GetSize(pat->children) != dims[next_dim].range_width)
+				return true;
+			int next_elem_width = 1;
+			for (int k = next_dim + 1; k < GetSize(dims); k++)
+				next_elem_width *= dims[k].range_width;
+			bool has_non_elem_width = false;
+			for (int i = 0; i < GetSize(members); i++) {
+				AstNode *ch = pat->children[i].get();
+				AstNode *m = members[i];
+				if (ch->type == AST_ASSIGN_PATTERN) {
+					if (m->type != AST_STRUCT && m->type != AST_UNION && m->dimensions.empty())
+						return false;
+				} else {
+					int cw = -1;
+					bool cs = false;
+					ch->detectSignWidth(cw, cs);
+					if (cw > 0 && cw != next_elem_width)
+						has_non_elem_width = true;
+				}
+			}
+			return has_non_elem_width;
+		}
+		return false;
+	};
+
+	auto elaborate_struct_pattern = [&](AstNode *pat) -> std::unique_ptr<AstNode> {
+		std::vector<AstNode*> members;
+		collect_struct_members(elem_stype, members);
+		if (members.empty())
+			pat->input_error("Named assignment pattern target is not a packed struct or union\n");
+		if (assignment_pattern_is_named(pat))
+			return elaborate_named_pattern(pat, members);
+		if (elem_stype->type != AST_STRUCT)
+			pat->input_error("Positional assignment pattern is not supported for packed union\n");
+		return elaborate_positional_pattern(pat, members);
+	};
+
+	const auto &dim = dims[dim_idx];
+	int count = dim.range_width;
+	int rem_dims = GetSize(dims) - dim_idx;
+	int elem_width = 1;
+	for (int d = dim_idx + 1; d < GetSize(dims); d++)
+		elem_width *= dims[d].range_width;
+
+	auto loc = pattern->location;
+
+	auto elaborate_elem = [&](AstNode *elem) -> std::unique_ptr<AstNode> {
+		auto val = strip_pattern_attrs(elem);
+		if (val->type == AST_ASSIGN_PATTERN) {
+			if (elem_stype && dim_idx + 2 == GetSize(dims))
+				return elaborate_struct_pattern(val.get());
+			if (dim_idx + 1 >= GetSize(dims))
+				elem->input_error("Nested assignment pattern exceeds packed array dimensions\n");
+			return elaborate_packed_array_pattern(val.get(), dims, dim_idx + 1, target_signed_sub_len, elem_stype);
+		}
+		return cast_to_width(loc, elem_width, std::move(val));
+	};
+
+	AstNode *default_elem = nullptr;
+	bool has_index = false;
+	bool has_positional = false;
+	for (auto &child : pattern->children) {
+		if (child->attributes.count(pattern_default_attr())) {
+			if (default_elem)
+				child->input_error("Assignment pattern has multiple defaults\n");
+			default_elem = child.get();
+		} else if (child->attributes.count(pattern_index_attr())) {
+			has_index = true;
+		} else if (child->attributes.count(pattern_member_attr())) {
+			child->input_error("Named assignment pattern target is not a packed struct or union\n");
+		} else {
+			has_positional = true;
+		}
+	}
+
+	if (has_positional && (has_index || default_elem))
+		pattern->input_error("Assignment pattern mixes positional and keyed elements\n");
+
+	auto matching_subarray_default = [&](AstNode *val, int start_dim) -> std::unique_ptr<AstNode> {
+		bool val_signed = false;
+		AstNode *val_elem_stype = nullptr;
+		auto val_dims = packed_dims_for_lhs(val, &val_signed, nullptr, &val_elem_stype);
+		if (GetSize(val_dims) >= 2 && same_struct_type(val_elem_stype, elem_stype)) {
+			int search_begin = std::max(start_dim, dim_idx + 1);
+			for (int d = search_begin; d < GetSize(dims); d++) {
+				int sub_len = GetSize(dims) - d;
+				if (GetSize(val_dims) != sub_len)
+					continue;
+				bool target_sub_signed = (sub_len == target_signed_sub_len);
+				if (val_signed != target_sub_signed)
+					continue;
+				bool match = true;
+				for (int k = 0; k < sub_len; k++) {
+					if (val_dims[k].range_right != dims[d + k].range_right ||
+							val_dims[k].range_width != dims[d + k].range_width ||
+							val_dims[k].range_swapped != dims[d + k].range_swapped) {
+						match = false;
+						break;
+					}
+				}
+				if (match) {
+					int rep_count = 1;
+					for (int k = start_dim; k < d; k++)
+						rep_count *= dims[k].range_width;
+					int sub_width = 1;
+					for (int k = d; k < GetSize(dims); k++)
+						sub_width *= dims[k].range_width;
+					auto casted = cast_to_width(loc, sub_width, val->clone());
+					if (rep_count == 1)
+						return casted;
+					return std::make_unique<AstNode>(loc, AST_REPLICATE,
+							AstNode::mkconst_int(loc, rep_count, false), std::move(casted));
+				}
+			}
+		}
+		return nullptr;
+	};
+
+	auto elaborate_default_nonpattern = [&](std::unique_ptr<AstNode> val, int start_dim) -> std::unique_ptr<AstNode> {
+		if (auto sub_rep = matching_subarray_default(val.get(), start_dim))
+			return sub_rep;
+		if (elem_stype && elem_stype->type == AST_STRUCT && !same_struct_type(struct_type_for_expr(val.get()), elem_stype)) {
+			auto synth_pat = std::make_unique<AstNode>(loc, AST_ASSIGN_PATTERN);
+			auto def_val = val->clone();
+			def_val->set_attribute(pattern_default_attr(), AstNode::mkconst_int(loc, 1, false));
+			synth_pat->children.push_back(std::move(def_val));
+			auto sub = elaborate_struct_pattern(synth_pat.get());
+			int rep_count = 1;
+			for (int k = start_dim; k < GetSize(dims) - 1; k++)
+				rep_count *= dims[k].range_width;
+			if (rep_count == 1)
+				return sub;
+			return std::make_unique<AstNode>(loc, AST_REPLICATE,
+					AstNode::mkconst_int(loc, rep_count, false), std::move(sub));
+		}
+		int total_bits = 1;
+		for (int d = start_dim; d < GetSize(dims); d++)
+			total_bits *= dims[d].range_width;
+		int rem = GetSize(dims) - start_dim;
+		if (rem <= 0)
+			return cast_to_width(loc, 1, std::move(val));
+		if (rem == 1 && start_dim == dim_idx) {
+			return std::make_unique<AstNode>(loc, AST_REPLICATE,
+					AstNode::mkconst_int(loc, dims[start_dim].range_width, false),
+					cast_to_width(loc, 1, std::move(val)));
+		}
+		int leaf_width = dims.back().range_width;
+		int leaf_count = total_bits / leaf_width;
+		auto casted = cast_to_width(loc, leaf_width, std::move(val));
+		if (leaf_count == 1)
+			return casted;
+		return std::make_unique<AstNode>(loc, AST_REPLICATE,
+				AstNode::mkconst_int(loc, leaf_count, false), std::move(casted));
+	};
+
+	// Default-only pattern: '{default: val}
+	if (default_elem && !has_index) {
+		auto val = strip_pattern_attrs(default_elem);
+		if (val->type == AST_ASSIGN_PATTERN) {
+			if (is_struct_element_pattern(val.get(), dim_idx + 1)) {
+				int rep_count = 1;
+				for (int k = dim_idx; k < GetSize(dims) - 1; k++)
+					rep_count *= dims[k].range_width;
+				auto sub = elaborate_struct_pattern(val.get());
+				if (rep_count == 1)
+					return sub;
+				return std::make_unique<AstNode>(loc, AST_REPLICATE, AstNode::mkconst_int(loc, rep_count, false), std::move(sub));
+			}
+			if (dim_idx + 1 >= GetSize(dims))
+				default_elem->input_error("Nested assignment pattern exceeds packed array dimensions\n");
+			auto sub = elaborate_packed_array_pattern(val.get(), dims, dim_idx + 1, target_signed_sub_len, elem_stype);
+			return std::make_unique<AstNode>(loc, AST_REPLICATE, AstNode::mkconst_int(loc, count, false), std::move(sub));
+		}
+		return elaborate_default_nonpattern(std::move(val), dim_idx);
+	}
+
+	// Indexed pattern: '{0: a, 2: b, default: c}
+	if (has_index) {
+		std::vector<AstNode*> slots(count, nullptr);
+		for (auto &child : pattern->children) {
+			if (child->attributes.count(pattern_default_attr()))
+				continue;
+			auto key_it = child->attributes.find(pattern_index_attr());
+			log_assert(key_it != child->attributes.end() && key_it->second);
+			auto key = key_it->second->clone();
+			while (key->simplify(true, 1, -1, false)) { }
+			if (key->type != AST_CONSTANT) {
+				if (child->attributes.count(pattern_member_attr()))
+					child->input_error("Named assignment pattern target is not a packed struct or union\n");
+				child->input_error("Indexed assignment pattern key must be a constant expression\n");
+			}
+			auto index = key->bitsAsConst().try_as_int(key->is_signed);
+			if (!index)
+				child->input_error("Indexed assignment pattern key does not fit in a 32-bit array index\n");
+			int64_t rel = (int64_t)*index - (int64_t)dim.range_right;
+			if (rel < 0 || rel >= count)
+				child->input_error("Indexed assignment pattern key %d is outside the array range\n", *index);
+			int slot = dim.range_swapped ? (count - 1 - (int)rel) : (int)rel;
+			if (slots[slot] != nullptr)
+				child->input_error("Duplicate index %d in indexed assignment pattern\n", *index);
+			slots[slot] = child.get();
+		}
+		auto concat = std::make_unique<AstNode>(loc, AST_CONCAT);
+		for (int s = 0; s < count; s++) {
+			AstNode *elem = slots[s] ? slots[s] : default_elem;
+			if (!elem)
+				pattern->input_error("Indexed assignment pattern does not specify every array element\n");
+			if (!slots[s] && default_elem && default_elem->type == AST_ASSIGN_PATTERN &&
+					dim_idx + 2 < GetSize(dims) && is_struct_element_pattern(default_elem, dim_idx + 1)) {
+				auto val = strip_pattern_attrs(default_elem);
+				int rep_count = 1;
+				for (int k = dim_idx + 1; k < GetSize(dims) - 1; k++)
+					rep_count *= dims[k].range_width;
+				auto sub = elaborate_struct_pattern(val.get());
+				if (rep_count == 1)
+					concat->children.push_back(std::move(sub));
+				else
+					concat->children.push_back(std::make_unique<AstNode>(loc, AST_REPLICATE,
+							AstNode::mkconst_int(loc, rep_count, false), std::move(sub)));
+			} else if (!slots[s] && default_elem && default_elem->type != AST_ASSIGN_PATTERN && rem_dims >= 2) {
+				concat->children.push_back(elaborate_default_nonpattern(strip_pattern_attrs(default_elem), dim_idx + 1));
+			} else {
+				concat->children.push_back(elaborate_elem(elem));
+			}
+		}
+		return concat;
+	}
+
+	// Positional pattern (reached only when nested inside a keyed/default packed-array pattern)
+	if (GetSize(pattern->children) != count)
+		pattern->input_error("Positional assignment pattern element count mismatch: got %d, expected %d\n",
+				GetSize(pattern->children), count);
+	auto concat = std::make_unique<AstNode>(loc, AST_CONCAT);
+	for (int i = count - 1; i >= 0; i--)
+		concat->children.push_back(elaborate_elem(pattern->children[i].get()));
+	return concat;
+}
+
 static std::unique_ptr<AstNode> pattern_element_value(AstNode *elem, AstNode *member)
 {
+	bool is_default_elem = elem->attributes.count(pattern_default_attr()) != 0 &&
+			elem->attributes.count(pattern_member_attr()) == 0;
 	auto value = elem->clone();
 	value->attributes.erase(pattern_member_attr());
 	value->attributes.erase(pattern_default_attr());
 	value->attributes.erase(pattern_index_attr());
 	if (value->type == AST_ASSIGN_PATTERN) {
+		if (member->type == AST_STRUCT_ITEM && !member->dimensions.empty() &&
+				(assignment_pattern_is_named(value.get()) || assignment_pattern_has_index_key(value.get()))) {
+			return elaborate_packed_array_pattern(value.get(), member->dimensions, 0,
+					signed_subarray_len_for_decl(member), struct_elem_type_for_decl(member));
+		}
 		if (member->type != AST_STRUCT && member->type != AST_UNION)
 			elem->input_error("Assignment pattern member '%s' is not a struct or union\n", member->str);
 		std::vector<AstNode*> sub;
@@ -1577,6 +2365,19 @@ static std::unique_ptr<AstNode> pattern_element_value(AstNode *elem, AstNode *me
 			if (member->type != AST_STRUCT)
 				elem->input_error("Positional assignment pattern is not supported for packed union member '%s'\n", member->str);
 			value = elaborate_positional_pattern(value.get(), sub);
+		}
+	} else if (is_default_elem && member->type == AST_STRUCT && !same_struct_type(struct_type_for_expr(value.get()), member)) {
+		// IEEE 1800-2017 10.9.2: an unmatched struct default recurses only into
+		// structure (or unpacked array) members. Every other member, including a
+		// multidimensional packed array, takes the default cast to its own type.
+		std::vector<AstNode*> sub;
+		collect_struct_members(member, sub);
+		if (!sub.empty()) {
+			auto synth = std::make_unique<AstNode>(elem->location, AST_ASSIGN_PATTERN);
+			auto def_val = value->clone();
+			def_val->set_attribute(pattern_default_attr(), AstNode::mkconst_int(elem->location, 1, false));
+			synth->children.push_back(std::move(def_val));
+			return elaborate_named_pattern(synth.get(), sub);
 		}
 	}
 	return value;
@@ -1737,11 +2538,30 @@ bool AstNode::resolve_cast_type(bool const_fold, int stage, int width_hint, bool
 		// Ensure typedef itself is fully simplified
 		while (template_node->simplify(const_fold, stage, width_hint, sign_hint)) {};
 
+		// A keyed operand pattern is elaborated against the cast type below, which
+		// can happen before the cast's children are simplified (from the switch in
+		// simplify() or from detectSignWidthWorker()). Resolve its element values
+		// first, as for an assignment pattern, so that defaults are matched against
+		// the type's packed subarrays and struct members.
+		if (GetSize(children) > 1 && children[1]->type == AST_ASSIGN_PATTERN &&
+				(assignment_pattern_is_named(children[1].get()) || assignment_pattern_has_index_key(children[1].get()))) {
+			while (!children[1]->basic_prep && children[1]->simplify(false, stage, -1, false)) { }
+		}
+
 		switch (template_node->type)
 		{
 		case AST_WIRE: {
 			if (template_node->children.size() > 0 && template_node->children[0]->type == AST_RANGE)
 				width = range_width(this, template_node->children[0].get());
+			if (GetSize(template_node->dimensions) > 1 && template_node->unpacked_dimensions == 0)
+				set_attribute(cast_type_dims_attr(), make_dims_multirange(location, template_node->dimensions, template_node->is_signed, template_node));
+			if (GetSize(children) > 1 && children[1]->type == AST_ASSIGN_PATTERN &&
+					!template_node->dimensions.empty() && template_node->unpacked_dimensions == 0 &&
+					(assignment_pattern_is_named(children[1].get()) || assignment_pattern_has_index_key(children[1].get()))) {
+				children[1] = elaborate_packed_array_pattern(children[1].get(), template_node->dimensions, 0,
+						signed_subarray_len_for_decl(template_node), struct_elem_type_for_decl(template_node));
+				fixup_hierarchy_flags();
+			}
 			child->delete_children();
 			node = mkconst_int(child->location, width, true);
 			break;
@@ -1750,6 +2570,7 @@ bool AstNode::resolve_cast_type(bool const_fold, int stage, int width_hint, bool
 		case AST_STRUCT:
 		case AST_UNION: {
 			width = size_packed_struct(template_node, 0);
+			set_attribute(cast_type_struct_attr(), mkconst_str(location, resolved_type_node->str));
 			if (GetSize(children) > 1 && children[1]->type == AST_ASSIGN_PATTERN &&
 					assignment_pattern_is_named(children[1].get())) {
 				std::vector<AstNode*> members;
@@ -2376,10 +3197,11 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 				// derives member dimensions from the range children. Turn the dimensions
 				// back into ranges so they are not added twice and a multi-dimensional
 				// alias keeps its shape.
-				if (!dimensions.empty() && !children.empty() && children[0]->type == AST_RANGE) {
-					if (GetSize(dimensions) > 1)
-						children[0] = dimensions_to_multirange(location, this, 0, GetSize(dimensions));
+				if (!children.empty()) {
+					if (GetSize(dimensions) > 1 && unpacked_dimensions == 0 && children[0]->type == AST_RANGE)
+						children[0] = make_dims_multirange(location, dimensions, is_signed);
 					dimensions.clear();
+					unpacked_dimensions = 0;
 				}
 			}
 
@@ -2944,6 +3766,12 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 				newNode->unpacked_dimensions = 0;
 				newNode->basic_prep = false;
 				newNode->range_valid = false;
+			} else if (newNode->type == AST_STRUCT || newNode->type == AST_UNION) {
+				// A struct/union clone (e.g. a typedef'd struct member) must not keep the
+				// template's {0, width} entry: size_packed_struct() appends a fresh one when
+				// the enclosing struct is sized, which would otherwise double the dimension.
+				newNode->dimensions.clear();
+				newNode->unpacked_dimensions = 0;
 			}
 
 			goto apply_newNode;
@@ -3144,6 +3972,17 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 		int dims_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.size() : 1;
 		// Save original number of dimensions for $size() etc.
 		integer = dims_sel;
+		AstNode *last_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.back().get() : children[0].get();
+		if (dims_sel > id2ast->unpacked_dimensions && last_sel->type == AST_RANGE && last_sel->children.size() == 2 && last_sel->range_valid) {
+			int l = last_sel->range_swapped ? last_sel->range_right : last_sel->range_left;
+			int r = last_sel->range_swapped ? last_sel->range_left : last_sel->range_right;
+			auto rn = make_range(location, l, r);
+			rn->range_valid = true;
+			rn->range_left = last_sel->range_left;
+			rn->range_right = last_sel->range_right;
+			rn->range_swapped = last_sel->range_swapped;
+			set_attribute(packed_part_range_attr(), std::move(rn));
+		}
 
 		// Record every preserved packed dimension whenever any packed selector is a
 		// range part-select (which preserves that dimension rather than consuming it).
@@ -3389,10 +4228,76 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 					// save type and original number of dimensions for $size() etc.
 					newNode->set_attribute(ID::wiretype, item_node->clone());
 					if (!item_node->dimensions.empty() && children.size() > 0) {
+						int dims_sel = 0;
 						if (children[0]->type == AST_RANGE)
-							newNode->integer = 1;
+							dims_sel = 1;
 						else if (children[0]->type == AST_MULTIRANGE)
-							newNode->integer = children[0]->children.size();
+							dims_sel = children[0]->children.size();
+						newNode->integer = dims_sel;
+						AstNode *last_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.back().get() : children[0].get();
+						if (last_sel->type == AST_RANGE && last_sel->children.size() == 2 && last_sel->range_valid) {
+							int l = last_sel->range_swapped ? last_sel->range_right : last_sel->range_left;
+							int r = last_sel->range_swapped ? last_sel->range_left : last_sel->range_right;
+							auto rn = make_range(location, l, r);
+							rn->range_valid = true;
+							rn->range_left = last_sel->range_left;
+							rn->range_right = last_sel->range_right;
+							rn->range_swapped = last_sel->range_swapped;
+							newNode->set_attribute(packed_part_range_attr(), std::move(rn));
+						}
+						int total_member_dims = GetSize(item_node->dimensions);
+						if (dims_sel >= 1 && dims_sel <= total_member_dims) {
+							bool has_part_select = false;
+							for (int k = 0; k < dims_sel; k++) {
+								AstNode *sel = children[0]->type == AST_MULTIRANGE ? children[0]->children[k].get() : children[0].get();
+								if (sel->type == AST_RANGE && sel->children.size() == 2) {
+									has_part_select = true;
+									break;
+								}
+							}
+							if (has_part_select) {
+								auto slice_dims = std::make_unique<AstNode>(location, AST_MULTIRANGE);
+								for (int k = 0; k < dims_sel; k++) {
+									AstNode *sel = children[0]->type == AST_MULTIRANGE ? children[0]->children[k].get() : children[0].get();
+									if (sel->type == AST_RANGE && sel->children.size() == 2) {
+										if (sel->range_valid) {
+											int l = sel->range_swapped ? sel->range_right : sel->range_left;
+											int r = sel->range_swapped ? sel->range_left : sel->range_right;
+											auto rn = make_range(location, l, r);
+											rn->range_valid = true;
+											rn->range_left = sel->range_left;
+											rn->range_right = sel->range_right;
+											rn->range_swapped = sel->range_swapped;
+											slice_dims->children.push_back(std::move(rn));
+										} else {
+											int dyn_w = 1;
+											bool ok = try_determine_range_width(sel, dyn_w);
+											auto rn = make_range(location, ok ? (dyn_w - 1) : 0, 0);
+											rn->range_valid = true;
+											rn->range_left = ok ? (dyn_w - 1) : 0;
+											rn->range_right = 0;
+											rn->range_swapped = false;
+											rn->integer = ok ? 0 : 1;
+											slice_dims->children.push_back(std::move(rn));
+										}
+									}
+								}
+								for (int k = dims_sel; k < total_member_dims; k++) {
+									const auto &d = item_node->dimensions[k];
+									int low_b = d.range_right;
+									int high_b = low_b + d.range_width - 1;
+									int l = d.range_swapped ? low_b : high_b;
+									int r = d.range_swapped ? high_b : low_b;
+									auto rn = make_range(location, l, r);
+									rn->range_valid = true;
+									rn->range_left = high_b;
+									rn->range_right = low_b;
+									rn->range_swapped = d.range_swapped;
+									slice_dims->children.push_back(std::move(rn));
+								}
+								newNode->set_attribute(packed_slice_dims_attr(), std::move(slice_dims));
+							}
+						}
 					}
 					newNode->basic_prep = true;
 					if (item_node->is_signed)
@@ -4344,21 +5249,84 @@ skip_dynamic_range_lvalue_expansion:;
 		}
 	}
 
-	// Named assignment pattern: '{member: expr, default: expr} -> concatenation in
-	// struct member order (LSB first). Positional patterns and array defaults stay on the
+	// Named/keyed assignment pattern: '{member: expr, default: expr} on packed
+	// structs/unions, or '{default: expr} / '{idx: expr, default: expr} on packed
+	// arrays/vectors. Positional patterns and unpacked-array patterns stay on the
 	// unpacked-array path.
 	if ((type == AST_ASSIGN_EQ || type == AST_ASSIGN_LE || type == AST_ASSIGN) &&
 			GetSize(children) >= 2 && children[1]->type == AST_ASSIGN_PATTERN &&
-			assignment_pattern_is_named(children[1].get()) && !is_unexpanded_array_ref(children[0].get()))
+			(assignment_pattern_is_named(children[1].get()) || assignment_pattern_has_index_key(children[1].get())) &&
+			!is_unexpanded_array_ref(children[0].get()))
 	{
-		if (!is_whole_struct_pattern_target(children[0].get()))
-			input_error("Named assignment pattern requires a whole struct or union target.\n");
-		auto members = members_for_lhs(children[0].get());
-		if (members.empty())
-			children[0]->input_error("Named assignment pattern target `%s' is not a packed struct or union\n", children[0]->str);
-		children[1] = elaborate_named_pattern(children[1].get(), members);
-		fixup_hierarchy_flags();
-		did_something = true;
+		auto members = is_whole_struct_pattern_target(children[0].get()) ? members_for_lhs(children[0].get()) : std::vector<AstNode*>{};
+		if (!members.empty()) {
+			children[1] = elaborate_named_pattern(children[1].get(), members);
+			fixup_hierarchy_flags();
+			did_something = true;
+		} else {
+			int target_signed_sub_len = -1;
+			auto dims = packed_dims_for_lhs(children[0].get(), nullptr, &target_signed_sub_len);
+			if (!dims.empty()) {
+				AstNode *elem_stype = nullptr;
+				if (GetSize(dims) >= 2) {
+					AstNode *target = unwrap_signed_member_target(children[0].get());
+					if (target->type == AST_IDENTIFIER) {
+						if (AstNode *member = target->get_struct_member())
+							elem_stype = struct_elem_type_for_decl(member);
+						else if (target->id2ast)
+							elem_stype = struct_elem_type_for_decl(target->id2ast);
+					}
+				}
+				children[1] = elaborate_packed_array_pattern(children[1].get(), dims, 0, target_signed_sub_len, elem_stype);
+				fixup_hierarchy_flags();
+				did_something = true;
+			} else if (children[0]->type == AST_IDENTIFIER && children[0]->id2ast &&
+					(children[0]->id2ast->type == AST_WIRE || children[0]->id2ast->type == AST_MEMORY) &&
+					children[0]->id2ast->dimensions.empty()) {
+				// Target declaration has not been simplified yet; retry next pass.
+				did_something = true;
+			} else if (!is_whole_struct_pattern_target(children[0].get())) {
+				input_error("Named assignment pattern requires a whole struct, union, or packed array target.\n");
+			} else {
+				children[0]->input_error("Named assignment pattern target `%s' is not a packed struct or union\n", children[0]->str);
+			}
+		}
+	}
+
+	if ((type == AST_PARAMETER || type == AST_LOCALPARAM) && !is_custom_type &&
+			!children.empty() && children[0]->type == AST_ASSIGN_PATTERN &&
+			(assignment_pattern_is_named(children[0].get()) || assignment_pattern_has_index_key(children[0].get())))
+	{
+		auto members = members_for_decl(this);
+		if (!members.empty()) {
+			children[0] = elaborate_named_pattern(children[0].get(), members);
+			fixup_hierarchy_flags();
+			did_something = true;
+		} else {
+			std::vector<AstNode::dimension_t> pdims;
+			if (!dimensions.empty() && unpacked_dimensions == 0) {
+				pdims = dimensions;
+			} else if (children.size() > 1 && children[1]->type == AST_RANGE && children[1]->range_valid) {
+				pdims.push_back({children[1]->range_right, children[1]->range_left - children[1]->range_right + 1, children[1]->range_swapped});
+			} else if (children.size() > 1 && children[1]->type == AST_MULTIRANGE && !children[1]->children.empty()) {
+				bool all_valid = true;
+				for (auto &r : children[1]->children) {
+					if (r->type != AST_RANGE || !r->range_valid) {
+						all_valid = false;
+						break;
+					}
+					pdims.push_back({r->range_right, r->range_left - r->range_right + 1, r->range_swapped});
+				}
+				if (!all_valid)
+					pdims.clear();
+			}
+			if (!pdims.empty()) {
+				AstNode *elem_stype = GetSize(pdims) >= 2 ? struct_elem_type_for_decl(this) : nullptr;
+				children[0] = elaborate_packed_array_pattern(children[0].get(), pdims, 0, signed_subarray_len_for_decl(this), elem_stype);
+				fixup_hierarchy_flags();
+				did_something = true;
+			}
+		}
 	}
 
 	// Expand array assignment: arr_out = arr_in OR arr_out = cond ? arr_a : arr_b OR arr_out = '{a, b}
@@ -5674,6 +6642,20 @@ skip_dynamic_range_lvalue_expansion:;
 				// func_workspace->dumpAst(stdout, "func_workspace ");
 				newNode = func_workspace->eval_const_function(this, in_param || require_const_eval);
 				if (newNode) {
+					for (auto &child : func_workspace->children) {
+						if (child->type == AST_WIRE && child->str == func_workspace->str) {
+							auto ret_wire = child->clone();
+							while (ret_wire->simplify(true, 1, -1, false)) { }
+							if (GetSize(ret_wire->dimensions) > 1 && ret_wire->unpacked_dimensions == 0)
+								newNode->set_attribute(cast_type_dims_attr(), make_dims_multirange(location, ret_wire->dimensions, ret_wire->is_signed, ret_wire.get()));
+							else if (!decl_is_array(ret_wire.get()) && struct_elem_type_for_decl(ret_wire.get())) {
+								auto wt_it = ret_wire->attributes.find(ID::wiretype);
+								if (wt_it != ret_wire->attributes.end())
+									newNode->set_attribute(cast_type_struct_attr(), wt_it->second->clone());
+							}
+							break;
+						}
+					}
 					goto apply_newNode;
 				}
 			}
@@ -5959,8 +6941,16 @@ replace_fcall_later:;
 						}
 						newNode = mkconst_bits(location, data, false);
 					} else
-					if (children.size() == 0)
+					if (children.size() == 0) {
 						newNode = current_scope[str]->children[0]->clone();
+						if (GetSize(current_scope[str]->dimensions) > 1 && current_scope[str]->unpacked_dimensions == 0)
+							newNode->set_attribute(cast_type_dims_attr(), make_dims_multirange(location, current_scope[str]->dimensions, current_scope[str]->is_signed, current_scope[str]));
+						else if (!decl_is_array(current_scope[str]) && struct_elem_type_for_decl(current_scope[str])) {
+							auto wt_it = current_scope[str]->attributes.find(ID::wiretype);
+							if (wt_it != current_scope[str]->attributes.end())
+								newNode->set_attribute(cast_type_struct_attr(), wt_it->second->clone());
+						}
+					}
 				} else
 				if (current_scope[str]->children[0]->isConst())
 					newNode = current_scope[str]->children[0]->clone();
@@ -5976,6 +6966,8 @@ replace_fcall_later:;
 		case AST_TO_UNSIGNED:
 			if (children[0]->type == AST_CONSTANT) {
 				RTLIL::Const y = children[0]->bitsAsConst(width_hint, sign_hint);
+				// The folded signing cast is a plain [n-1:0] vector (IEEE 1800-2017 6.24.1),
+				// so the operand's packed array/struct type attributes are not carried over.
 				newNode = mkconst_bits(location, y.to_bits(), type == AST_TO_SIGNED);
 			}
 			break;
@@ -6126,6 +7118,22 @@ replace_fcall_later:;
 								newNode = mkconst_str(location, y.to_bits());
 							else
 								newNode = mkconst_bits(location, y.to_bits(), sign_hint);
+							bool tern_signed = false;
+							AstNode *tern_stype = nullptr;
+							auto tern_dims = packed_dims_for_lhs(this, &tern_signed, nullptr, &tern_stype);
+							if (GetSize(tern_dims) > 1) {
+								AstNode *src = nullptr;
+								if (tern_stype) {
+									auto dt = choice->attributes.find(cast_type_dims_attr());
+									if (dt != choice->attributes.end())
+										src = dt->second.get();
+								}
+								newNode->set_attribute(cast_type_dims_attr(), make_dims_multirange(location, tern_dims, tern_signed, src));
+							} else if (struct_type_for_expr(this)) {
+								auto st_it = choice->attributes.find(cast_type_struct_attr());
+								if (st_it != choice->attributes.end())
+									newNode->set_attribute(cast_type_struct_attr(), st_it->second->clone());
+							}
 						}
 					} else
 					if (choice->isConst()) {
@@ -6139,6 +7147,22 @@ replace_fcall_later:;
 						if (a[i] != b[i])
 							a.set(i, RTLIL::State::Sx);
 					newNode = mkconst_bits(location, a.to_bits(), sign_hint);
+					bool tern_signed = false;
+					AstNode *tern_stype = nullptr;
+					auto tern_dims = packed_dims_for_lhs(this, &tern_signed, nullptr, &tern_stype);
+					if (GetSize(tern_dims) > 1) {
+						AstNode *src = nullptr;
+						if (tern_stype) {
+							auto dt = children[1]->attributes.find(cast_type_dims_attr());
+							if (dt != children[1]->attributes.end())
+								src = dt->second.get();
+						}
+						newNode->set_attribute(cast_type_dims_attr(), make_dims_multirange(location, tern_dims, tern_signed, src));
+					} else if (struct_type_for_expr(this)) {
+						auto st_it = children[1]->attributes.find(cast_type_struct_attr());
+						if (st_it != children[1]->attributes.end())
+							newNode->set_attribute(cast_type_struct_attr(), st_it->second->clone());
+					}
 				} else if (children[1]->isConst() && children[2]->isConst()) {
 					newNode = std::make_unique<AstNode>(location, AST_REALVALUE);
 					if (children[1]->asReal(sign_hint) == children[2]->asReal(sign_hint))
@@ -6160,6 +7184,12 @@ replace_fcall_later:;
 				else
 					val = children[1]->bitsAsConst(width);
 				newNode = mkconst_bits(location, val.to_bits(), children[1]->is_signed);
+				auto cast_it = attributes.find(cast_type_dims_attr());
+				if (cast_it != attributes.end())
+					newNode->set_attribute(cast_type_dims_attr(), cast_it->second->clone());
+				auto struct_it = attributes.find(cast_type_struct_attr());
+				if (struct_it != attributes.end())
+					newNode->set_attribute(cast_type_struct_attr(), struct_it->second->clone());
 			}
 			break;
 		case AST_CONCAT:

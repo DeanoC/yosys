@@ -1528,6 +1528,33 @@ static void rename_in_package_stmts(AstNode *pkg)
 			rename(item.get(), no_locals, no_locals);
 }
 
+// Typedefs and parameters that use typedefs of the same package (struct
+// members, typedef aliases, typed parameters) were resolved inside the package
+// and record the bare type name in their type attributes. Modules only see the
+// package's typedefs under qualified names, so qualify those attributes to match.
+static void qualify_package_type_attrs(AstNode *pkg)
+{
+	std::unordered_set<std::string> types;
+	collect_package_local_types(pkg, types);
+	const RTLIL::IdString type_attrs[] = {ID::wiretype, intern_attr_name("\\sv_cast_struct_type")};
+	std::function<void(AstNode *)> qualify = [&](AstNode *node) {
+		for (auto attr : type_attrs) {
+			auto it = node->attributes.find(attr);
+			if (it == node->attributes.end() || !it->second)
+				continue;
+			if (it->second->is_string && types.count(it->second->str))
+				it->second = AstNode::mkconst_str(it->second->location, pkg->str + "::" + it->second->str.substr(1));
+			else
+				qualify(it->second.get());
+		}
+		for (auto &child : node->children)
+			qualify(child.get());
+	};
+	for (auto &item : pkg->children)
+		if (item->type == AST_TYPEDEF || item->type == AST_PARAMETER || item->type == AST_LOCALPARAM)
+			qualify(item.get());
+}
+
 // create AstModule instances for all modules in the AST tree and add them to 'design'
 void AST::process(RTLIL::Design *design, AstNode *ast, bool nodisplay, bool dump_ast1, bool dump_ast2, bool no_dump_ptr, bool dump_vlog1, bool dump_vlog2, bool dump_rtlil,
 		bool nolatches, bool nomeminit, bool nomem2reg, bool mem2reg, bool noblackbox, bool lib, bool nowb, bool noopt, bool icells, bool pwires, bool nooverwrite, bool overwrite, bool defer, bool autowire)
@@ -1627,6 +1654,7 @@ void AST::process(RTLIL::Design *design, AstNode *ast, bool nodisplay, bool dump
 			// process enum/other declarations
 			child->simplify(true, 1, -1, false);
 			rename_in_package_stmts(child.get());
+			qualify_package_type_attrs(child.get());
 			design->verilog_packages.push_back(child->clone());
 			current_scope.clear();
 		}

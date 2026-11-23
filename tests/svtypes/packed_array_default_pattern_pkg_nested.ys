@@ -1,0 +1,4 @@
+read_verilog -sv packed_array_default_pattern_pkg_nested.sv
+prep -top top
+async2sync
+sat -verify -prove-asserts

@@ -72,6 +72,11 @@ module top;
 		assert(s1.ir.r.rd == 'd29);
 		assert(s1.ir.u.imm == 'hAA01);
 		assert(s1.state == 4'b1111);
+		// typedef'd struct/union members keep a single packed dimension
+		assert($bits(ir1.u) == 32);
+		assert(ir1.u[6:0] == 'h37);
+		assert($bits(s1.ir) == 32);
+		assert(s1.ir[6:0] == 'h37);
 	end
 
 	union packed {
