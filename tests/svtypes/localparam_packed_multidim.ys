@@ -2,3 +2,78 @@ read_verilog -sv localparam_packed_multidim.sv
 prep -top top -flatten
 async2sync
 sat -verify -prove-asserts
+
+design -reset
+
+# Array query functions on dynamically indexed 1-D ranged parameters. These
+# used to fail with "Dimension 2 out of range".
+read_verilog -sv <<EOT
+module top (
+	input logic [1:0] a
+);
+	localparam logic [7:0] P = 8'hA5;
+	localparam logic [0:7] P_UP = 8'hA5;
+	logic [7:0] p_w;
+	assign p_w = P;
+
+	always_comb assert($bits(P[a]) == 1);
+	always_comb assert($size(P[a]) == 1);
+	always_comb assert($dimensions(P[a]) == 1);
+	always_comb assert($left(P[a]) == 0 && $right(P[a]) == 0);
+	always_comb assert($bits(P_UP[a]) == 1);
+	always_comb assert($bits(P[a +: 2]) == 2 && $size(P[a +: 2]) == 2);
+	always_comb assert($bits(P[a -: 2]) == 2);
+	always_comb assert(P[a] == p_w[a]);
+	always_comb assert(P[a +: 2] == p_w[a +: 2]);
+endmodule
+EOT
+prep -top top
+async2sync
+sat -verify -prove-asserts
+
+design -reset
+
+# $unit-scope declarations are appended after the module items, so the module
+# declarations below use these parameters before they are simplified. This used
+# to loop forever. GW, GB and G are only built from literals and get resolved on
+# demand; G_N and G_D (non-literal ranges) are resolved on a later pass.
+read_verilog -sv <<EOT
+localparam logic [1:0][3:0] GW = {4'h2, 4'h7};
+localparam logic [2:0][1:0] GB = 6'h15;
+localparam logic [1:0][3:0] G = {4'h3, 4'h5};
+localparam int N = 2;
+localparam logic [N-1:0][3:0] G_N = {4'h6, 4'h9};
+localparam logic [N-1:0][3:0] G_D = 8'hC4;
+
+module top (
+	input  logic       sel,
+	output logic [3:0] o
+);
+	logic [GW[1]:0] w_gw;
+	logic [$bits(GB)-1:0] w_gb;
+	localparam logic [3:0] X = G[1];
+	localparam logic [3:0] X_N = G_N[0];
+	localparam logic [3:0] X_D = G_D[1];
+	localparam int B = $bits(G);
+	localparam int B_N = $bits(G_N);
+	localparam int S_N = $size(G_N, 1);
+	logic [G[0]:0] w;
+	logic [$bits(G)-1:0] w_bits;
+	logic [G_N[1]-1:0] w_n;
+	assign o = G[sel];
+
+	always_comb assert($bits(w_gw) == 3);
+	always_comb assert($bits(w_gb) == 6);
+	always_comb assert(X == 4'h3);
+	always_comb assert(X_N == 4'h9);
+	always_comb assert(X_D == 4'hC);
+	always_comb assert(B == 8 && B_N == 8 && S_N == 2);
+	always_comb assert($bits(w) == 6);
+	always_comb assert($bits(w_bits) == 8);
+	always_comb assert($bits(w_n) == 6);
+	always_comb assert(o == (sel ? 4'h3 : 4'h5));
+endmodule
+EOT
+prep -top top
+async2sync
+sat -verify -prove-asserts

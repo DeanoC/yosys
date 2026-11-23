@@ -268,6 +268,73 @@ static int add_dimension(AstNode *node, AstNode *rnode)
 	return width;
 }
 
+// True if the expression is built only from literals and operators. Simplifying
+// it cannot resolve any names, so the result does not depend on the scope it is
+// simplified from, and it cannot recurse back into the node that triggered it.
+static bool is_literal_only_expr(const AstNode *node)
+{
+	switch (node->type) {
+	case AST_CONSTANT:
+	case AST_REALVALUE:
+	case AST_RANGE:
+	case AST_MULTIRANGE:
+	case AST_CONCAT:
+	case AST_REPLICATE:
+	case AST_TO_SIGNED:
+	case AST_TO_UNSIGNED:
+	case AST_BIT_NOT:
+	case AST_BIT_AND:
+	case AST_BIT_OR:
+	case AST_BIT_XOR:
+	case AST_BIT_XNOR:
+	case AST_SHIFT_LEFT:
+	case AST_SHIFT_RIGHT:
+	case AST_SHIFT_SLEFT:
+	case AST_SHIFT_SRIGHT:
+	case AST_ADD:
+	case AST_SUB:
+	case AST_MUL:
+	case AST_DIV:
+	case AST_MOD:
+	case AST_POW:
+	case AST_POS:
+	case AST_NEG:
+		break;
+	default:
+		return false;
+	}
+	if (!node->attributes.empty())
+		return false;
+	for (auto &child : node->children)
+		if (!is_literal_only_expr(child.get()))
+			return false;
+	return true;
+}
+
+// A parameter/localparam with packed multidimensional type keeps its
+// AST_MULTIRANGE until its own declaration is simplified. It can be referenced
+// before that: by a forward reference, or when it is a $unit-scope declaration,
+// as those are appended after the module items. Simplify such a declaration on
+// demand when that is safe (it is built only from literals), so the reference
+// can be resolved right away, e.g. in a wire range. Returns true if the
+// declaration has been flattened; otherwise the caller must leave the reference
+// alone (without reporting progress) and retry on a later pass.
+static bool resolve_multirange_param_decl(AstNode *decl)
+{
+	if (decl->type != AST_PARAMETER && decl->type != AST_LOCALPARAM)
+		return false;
+	if (GetSize(decl->children) < 2 || decl->children[1]->type != AST_MULTIRANGE || decl->is_custom_type)
+		return false;
+	for (auto &child : decl->children)
+		if (!is_literal_only_expr(child.get()))
+			return false;
+	for (auto &attr : decl->attributes)
+		if (!is_literal_only_expr(attr.second.get()))
+			return false;
+	while (decl->simplify(true, 1, -1, false)) { }
+	return decl->children[1]->type != AST_MULTIRANGE;
+}
+
 [[noreturn]] static void struct_array_packing_error(AstNode *node)
 {
 	node->input_error("Unpacked array in packed struct/union member %s\n", node->str);
@@ -1694,6 +1761,10 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 
 	std::unique_ptr<AstNode> newNode = nullptr;
 	bool did_something = false;
+	// Set when this node is waiting for a declaration to be resolved first. The
+	// node is then left unchanged (no progress reported) but must not be marked
+	// basic_prep, as it still needs to be processed once the declaration is ready.
+	bool waiting_on_decl = false;
 
 #if 0
 	log("-------------\n");
@@ -2991,8 +3062,13 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 	}
 
 	// Resolve multidimensional array access.
+	// Parameters only take this path once their packed dimensions have been
+	// flattened and there is more than one of them. A select on a 1-D ranged
+	// parameter is never rewritten: it keeps its original range, so it is folded
+	// or handled by the array query functions just like before.
 	if (type == AST_IDENTIFIER && !basic_prep && id2ast &&
-		(id2ast->type == AST_WIRE || id2ast->type == AST_MEMORY || id2ast->type == AST_PARAMETER || id2ast->type == AST_LOCALPARAM) &&
+		(id2ast->type == AST_WIRE || id2ast->type == AST_MEMORY ||
+		 ((id2ast->type == AST_PARAMETER || id2ast->type == AST_LOCALPARAM) && GetSize(id2ast->dimensions) > 1)) &&
 		!(id2ast->children.size() > 1 && id2ast->children[1]->type == AST_MULTIRANGE) &&
 		children.size() > 0 && (children[0]->type == AST_RANGE || children[0]->type == AST_MULTIRANGE))
 	{
@@ -4852,7 +4928,14 @@ skip_dynamic_range_lvalue_expansion:;
 						expr_dimensions = 1;
 					} else if ((id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) &&
 							id_ast->children.size() > 1 && id_ast->children[1]->type == AST_MULTIRANGE) {
-						did_something = true;
+						// The parameter's packed dimensions are not flattened yet. Resolve
+						// the declaration if that is safe; otherwise retry on a later pass.
+						// Only report progress if something changed: callers loop on
+						// simplify() until it returns false.
+						if (resolve_multirange_param_decl(id_ast))
+							did_something = true;
+						else
+							waiting_on_decl = true;
 						goto replace_fcall_later;
 					} else if (id_ast->type == AST_WIRE || id_ast->type == AST_MEMORY ||
 							((id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) && !id_ast->dimensions.empty())) {
@@ -4867,7 +4950,12 @@ skip_dynamic_range_lvalue_expansion:;
 							id_ast = item_node;
 
 						int dims = GetSize(id_ast->dimensions);
-						bool is_param_query = (id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) && !buf->basic_prep;
+						// The selects on a parameter reference are still the original ones
+						// unless the multidimensional access block rewrote them, which also
+						// sets basic_prep. That block skips 1-D parameters, whose references
+						// only become basic_prep by being fully simplified (e.g. P[a]).
+						bool is_param_query = (id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) &&
+								(!buf->basic_prep || dims == 1);
 						AstNode *param_last_sel = nullptr;
 						int param_idx_dims = 0;
 						if (is_param_query && !buf->children.empty()) {
@@ -5505,7 +5593,17 @@ replace_fcall_later:;
 		case AST_IDENTIFIER:
 			if (current_scope.count(str) > 0 && (current_scope[str]->type == AST_PARAMETER || current_scope[str]->type == AST_LOCALPARAM || current_scope[str]->type == AST_ENUM_ITEM)) {
 				if (current_scope[str]->children.size() > 1 && current_scope[str]->children[1]->type == AST_MULTIRANGE) {
-					did_something = true;
+					// The declaration's packed dimensions are not flattened yet, so
+					// folding now would use the wrong layout. Resolve the declaration
+					// if that is safe; otherwise leave the reference for a later pass.
+					// Only report progress if something changed: callers loop on
+					// simplify() until it returns false. The multidimensional access
+					// still has to be resolved, so don't let this become basic_prep.
+					if (resolve_multirange_param_decl(current_scope[str]))
+						did_something = true;
+					else
+						waiting_on_decl = true;
+					break;
 				} else if (current_scope[str]->children[0]->type == AST_CONSTANT) {
 					if (children.size() != 0 && children[0]->type == AST_RANGE && children[0]->range_valid) {
 						if (!basic_prep && GetSize(current_scope[str]->dimensions) > 1) {
@@ -5789,7 +5887,7 @@ apply_newNode:
 		did_something = true;
 	}
 
-	if (!did_something)
+	if (!did_something && !waiting_on_decl)
 		basic_prep = true;
 
 	recursion_counter--;
