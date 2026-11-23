@@ -1109,6 +1109,7 @@ void AstNode::detectSignWidthWorker(int &width_hint, bool &sign_hint, bool *foun
 	case AST_SELFSZ:
 		sub_width_hint = 0;
 		children.at(0)->detectSignWidthWorker(sub_width_hint, sign_hint);
+		width_hint = max(width_hint, sub_width_hint);
 		break;
 
 	case AST_CAST_SIZE:

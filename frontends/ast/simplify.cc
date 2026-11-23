@@ -521,6 +521,10 @@ static std::unique_ptr<AstNode> normalize_index(AstNode *expr, AstNode *decl_nod
 {
 	auto new_expr = expr->clone();
 	auto loc = expr->location;
+	// Array select indices are self-determined (IEEE 1800-2017 Table 11-21);
+	// isolate the index before surrounding 32-bit offset/stride arithmetic.
+	if (new_expr->type != AST_CONSTANT && new_expr->type != AST_SELFSZ)
+		new_expr = std::make_unique<AstNode>(loc, AST_SELFSZ, std::move(new_expr));
 
 	int offset = decl_node->dimensions[dimension].range_right;
 	if (offset) {
@@ -4366,7 +4370,10 @@ skip_dynamic_range_lvalue_expansion:;
 			assign_addr->children[0]->was_checked = true;
 			defNode->children.push_back(std::move(assign_addr));
 
-			assign_addr = std::make_unique<AstNode>(location, AST_ASSIGN_EQ, std::make_unique<AstNode>(location, AST_IDENTIFIER), children[0]->children[0]->children[0]->clone());
+			auto addr_expr = children[0]->children[0]->children[0]->clone();
+			if (addr_expr->type != AST_CONSTANT && addr_expr->type != AST_SELFSZ)
+				addr_expr = std::make_unique<AstNode>(location, AST_SELFSZ, std::move(addr_expr));
+			assign_addr = std::make_unique<AstNode>(location, AST_ASSIGN_EQ, std::make_unique<AstNode>(location, AST_IDENTIFIER), std::move(addr_expr));
 			assign_addr->children[0]->str = id_addr;
 			assign_addr->children[0]->was_checked = true;
 			newNode->children.push_back(std::move(assign_addr));
@@ -6315,7 +6322,10 @@ bool AstNode::mem2reg_as_needed_pass2(pool<AstNode*> &mem2reg_set, AstNode *mod,
 			assign_idx++;
 		log_assert(assign_idx < block->children.size());
 
-		auto assign_addr = std::make_unique<AstNode>(location, AST_ASSIGN_EQ, std::make_unique<AstNode>(location, AST_IDENTIFIER), children[0]->children[0]->children[0]->clone());
+		auto addr_expr = children[0]->children[0]->children[0]->clone();
+		if (addr_expr->type != AST_CONSTANT && addr_expr->type != AST_SELFSZ)
+			addr_expr = std::make_unique<AstNode>(location, AST_SELFSZ, std::move(addr_expr));
+		auto assign_addr = std::make_unique<AstNode>(location, AST_ASSIGN_EQ, std::make_unique<AstNode>(location, AST_IDENTIFIER), std::move(addr_expr));
 		assign_addr->children[0]->str = id_addr;
 		assign_addr->children[0]->was_checked = true;
 		block->children.insert(block->children.begin()+assign_idx+1, std::move(assign_addr));
@@ -6430,7 +6440,10 @@ bool AstNode::mem2reg_as_needed_pass2(pool<AstNode*> &mem2reg_set, AstNode *mod,
 			while (wire_data->simplify(true, 1, -1, false)) { }
 			mod->children.push_back(std::move(wire_data));
 
-			auto assign_addr = std::make_unique<AstNode>(location, block ? AST_ASSIGN_EQ : AST_ASSIGN, std::make_unique<AstNode>(location, AST_IDENTIFIER), children[0]->children[0]->clone());
+			auto addr_expr = children[0]->children[0]->clone();
+			if (addr_expr->type != AST_CONSTANT && addr_expr->type != AST_SELFSZ)
+				addr_expr = std::make_unique<AstNode>(location, AST_SELFSZ, std::move(addr_expr));
+			auto assign_addr = std::make_unique<AstNode>(location, block ? AST_ASSIGN_EQ : AST_ASSIGN, std::make_unique<AstNode>(location, AST_IDENTIFIER), std::move(addr_expr));
 			assign_addr->children[0]->str = id_addr;
 			assign_addr->children[0]->was_checked = true;
 
