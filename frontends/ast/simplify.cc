@@ -1502,8 +1502,19 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs)
 		start_dim = 0;
 	} else if (lhs->basic_prep && lhs->integer > 0) {
 		int idx_dims = (int)lhs->integer;
-		if (idx_dims >= decl->unpacked_dimensions && idx_dims < GetSize(decl->dimensions))
+		if (idx_dims >= decl->unpacked_dimensions && idx_dims < GetSize(decl->dimensions)) {
 			start_dim = idx_dims;
+		} else if (idx_dims == GetSize(decl->dimensions) && !lhs->children.empty()) {
+			AstNode *sel = lhs->children.back().get();
+			if (sel->type == AST_RANGE && sel->children.size() == 2) {
+				bool single_packed_dim = (GetSize(decl->dimensions) - decl->unpacked_dimensions) == 1;
+				if (single_packed_dim && sel->range_valid)
+					return {{sel->range_right, lhs_width, sel->range_swapped}};
+				if (lhs_width > 1 || (sel->range_valid && sel->range_left == sel->range_right))
+					return {{0, lhs_width, false}};
+			}
+			return {};
+		}
 	}
 
 	if (start_dim < 0)
@@ -1513,8 +1524,13 @@ static std::vector<AstNode::dimension_t> packed_dims_for_lhs(AstNode *lhs)
 	int total = 1;
 	for (const auto &d : dims)
 		total *= d.range_width;
-	if (total != lhs_width)
+	if (total != lhs_width) {
+		if (start_dim > decl->unpacked_dimensions && total > 0 && lhs_width > total && lhs_width % total == 0) {
+			dims.insert(dims.begin(), {0, lhs_width / total, false});
+			return dims;
+		}
 		return {};
+	}
 	return dims;
 }
 

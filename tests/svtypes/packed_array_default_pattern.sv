@@ -30,6 +30,10 @@ module top (
 	logic [1:0][2:0][3:0]  c3d_idx_row;
 	logic [1:0][2:0][3:0]  c3d_idx_leaf;
 	logic [1:0][1:0][2:0][3:0] c4d_row;
+	logic [7:0]            v_ps;
+	logic [7:0]            v_ps_idx;
+	logic [2:0][3:0]       c2d_ps;
+	logic [2:0][3:0]       c2d_outer_ps;
 
 	typedef logic [2:0][3:0] arr3x4_t;
 	arr3x4_t c_cast;
@@ -57,6 +61,14 @@ module top (
 		c3d_idx_row  = '{0: other_row, default: row};
 		c3d_idx_leaf = '{0: other_row, default: 4'h5};
 		c4d_row      = '{default: row};
+		v_ps         = 8'h00;
+		v_ps[3:0]    = '{default: 1'b1};
+		v_ps_idx     = 8'hFF;
+		v_ps_idx[5:2] = '{5: 1'b1, default: 1'b0};
+		c2d_ps       = 12'h000;
+		c2d_ps[1][2:1] = '{default: 1'b1};
+		c2d_outer_ps = 12'h000;
+		c2d_outer_ps[2:1] = '{default: 4'h7};
 	end
 
 	always_comb assert(c2d == {4'd5, 4'd5, 4'd5});
@@ -72,4 +84,8 @@ module top (
 	always_comb assert(c3d_idx_row == {12'h123, 12'hABC});
 	always_comb assert(c3d_idx_leaf == {12'h555, 12'hABC});
 	always_comb assert(c4d_row == {4{12'h123}});
+	always_comb assert(v_ps == 8'h0F);
+	always_comb assert(v_ps_idx == 8'b1110_0011);
+	always_comb assert(c2d_ps == 12'h060);
+	always_comb assert(c2d_outer_ps == 12'h770);
 endmodule
