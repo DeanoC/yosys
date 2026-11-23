@@ -77,3 +77,46 @@ EOT
 prep -top top
 async2sync
 sat -verify -prove-asserts
+
+design -reset
+
+# Array query functions on multi-dimension part-selected packed parameters
+# (both in constant expressions and runtime contexts).
+read_verilog -sv <<EOT
+module top (
+	input logic [1:0] a
+);
+	localparam logic [3:0][3:0] T = 16'h1234;
+	localparam logic [3:0][2:0][7:0] M = 96'h0;
+
+	localparam int B_TT = $bits(T[2:1][2:1]);
+	localparam int D_TT = $dimensions(T[2:1][2:1]);
+	localparam int L1_TT = $left(T[2:1][2:1], 1);
+	localparam int R1_TT = $right(T[2:1][2:1], 1);
+	localparam int L2_TT = $left(T[2:1][2:1], 2);
+	localparam int R2_TT = $right(T[2:1][2:1], 2);
+	localparam int B_TI = $bits(T[2:1][0]);
+	localparam int D_TI = $dimensions(T[2:1][0]);
+	localparam int B_M3 = $bits(M[2:1][0][5:2]);
+	localparam int D_M3 = $dimensions(M[2:1][0][5:2]);
+	localparam int B_M2 = $bits(M[2:1][0]);
+	localparam int D_M2 = $dimensions(M[2:1][0]);
+
+	always_comb assert(B_TT == 4 && D_TT == 2 && L1_TT == 2 && R1_TT == 1 && L2_TT == 2 && R2_TT == 1);
+	always_comb assert(B_TI == 2 && D_TI == 1);
+	always_comb assert(B_M3 == 8 && D_M3 == 2 && B_M2 == 16 && D_M2 == 2);
+	always_comb assert($bits(T[2:1][2:1]) == 4 && $dimensions(T[2:1][2:1]) == 2);
+	always_comb assert($size(T[2:1][2:1], 1) == 2 && $size(T[2:1][2:1], 2) == 2);
+	always_comb assert($bits(T[2:1][0]) == 2 && $dimensions(T[2:1][0]) == 1);
+	always_comb assert($left(T[2:1][0]) == 2 && $right(T[2:1][0]) == 1);
+	always_comb assert($bits(T[a +: 2][2:1]) == 4 && $dimensions(T[a +: 2][2:1]) == 2);
+	always_comb assert($bits(M[2:1][0][5:2]) == 8 && $dimensions(M[2:1][0][5:2]) == 2);
+	always_comb assert($size(M[2:1][0][5:2], 1) == 2 && $size(M[2:1][0][5:2], 2) == 4);
+	always_comb assert($bits(M[2:1][0]) == 16 && $dimensions(M[2:1][0]) == 2);
+	always_comb assert($size(M[2:1][0], 1) == 2 && $size(M[2:1][0], 2) == 8);
+endmodule
+EOT
+prep -top top
+async2sync
+sat -verify -prove-asserts
+

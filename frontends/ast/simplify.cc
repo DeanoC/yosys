@@ -5049,6 +5049,44 @@ skip_dynamic_range_lvalue_expansion:;
 					width = high - low + 1;
 				};
 
+				auto eval_from_slice_dims = [&](AstNode *target, AstNode *slice_node, int fallback_arg_width) {
+					auto &sdims = slice_node->children;
+					int total_dims = GetSize(sdims);
+					if (req_dim < 1 || req_dim > total_dims)
+						input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", req_dim, target->str, total_dims);
+					std::vector<int> dim_widths(total_dims, 1);
+					int dyn_idx = -1;
+					int known_prod = 1;
+					for (int i = 0; i < total_dims; i++) {
+						auto *r = sdims[i].get();
+						if (r->integer != 0) {
+							dyn_idx = i;
+						} else {
+							while (!r->range_valid && r->simplify(true, stage, -1, false)) { }
+							dim_widths[i] = r->range_left - r->range_right + 1;
+							known_prod *= dim_widths[i];
+						}
+					}
+					if (dyn_idx >= 0 && fallback_arg_width > 0 && known_prod > 0)
+						dim_widths[dyn_idx] = fallback_arg_width / known_prod;
+					expr_dimensions = total_dims - req_dim + 1;
+					expr_unpacked_dimensions = 0;
+					width = dim_widths[req_dim - 1];
+					mem_depth = 1;
+					for (int i = req_dim; i < total_dims; i++)
+						mem_depth *= dim_widths[i];
+					auto *qr = sdims[req_dim - 1].get();
+					if (qr->integer != 0) {
+						right = low = 0;
+						left = high = width - 1;
+					} else {
+						right = low = qr->range_right;
+						left = high = qr->range_left;
+						if (qr->range_swapped)
+							std::swap(left, right);
+					}
+				};
+
 				if (buf->type == AST_WIRE || buf->type == AST_MEMORY || buf->type == AST_STRUCT || buf->type == AST_UNION) {
 					while (buf->simplify(true, stage, -1, false)) { }
 					if (buf->type == AST_STRUCT || buf->type == AST_UNION) {
@@ -5121,91 +5159,78 @@ skip_dynamic_range_lvalue_expansion:;
 								id_ast = item_node;
 
 							int dims = GetSize(id_ast->dimensions);
-							// The selects on a parameter reference are still the original ones
-							// unless the multidimensional access block rewrote them, which also
-							// sets basic_prep. That block skips 1-D parameters, whose references
-							// only become basic_prep by being fully simplified (e.g. P[a]).
-							bool is_param_query = (id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) &&
-									(!buf->basic_prep || dims == 1);
-							AstNode *param_last_sel = nullptr;
-							int param_idx_dims = 0;
-							if (is_param_query && !buf->children.empty()) {
-								if (buf->children[0]->type == AST_MULTIRANGE) {
-									param_idx_dims = GetSize(buf->children[0]->children);
-									if (param_idx_dims > 0)
-										param_last_sel = buf->children[0]->children.back().get();
-								} else if (buf->children[0]->type == AST_RANGE) {
-									param_idx_dims = 1;
-									param_last_sel = buf->children[0].get();
+							auto slice_it = !from_struct_array_member ? buf->attributes.find(packed_slice_dims_attr()) : buf->attributes.end();
+							if (slice_it != buf->attributes.end() && slice_it->second->type == AST_MULTIRANGE && !slice_it->second->children.empty()) {
+								eval_from_slice_dims(id_ast, slice_it->second.get(), arg_width);
+							} else {
+								// The selects on a parameter reference are still the original ones
+								// unless the multidimensional access block rewrote them, which also
+								// sets basic_prep. That block skips 1-D parameters, whose references
+								// only become basic_prep by being fully simplified (e.g. P[a]).
+								bool is_param_query = (id_ast->type == AST_PARAMETER || id_ast->type == AST_LOCALPARAM) &&
+										(!buf->basic_prep || dims == 1);
+								std::vector<AstNode*> param_sels;
+								if (is_param_query && !buf->children.empty()) {
+									if (buf->children[0]->type == AST_MULTIRANGE) {
+										for (auto &c : buf->children[0]->children)
+											param_sels.push_back(c.get());
+									} else if (buf->children[0]->type == AST_RANGE) {
+										param_sels.push_back(buf->children[0].get());
+									}
 								}
-							}
+								int param_idx_dims = GetSize(param_sels);
+								bool has_part_select = false;
+								if (is_param_query && param_idx_dims >= 1 && param_idx_dims <= dims) {
+									for (AstNode *sel : param_sels) {
+										if (sel->type == AST_RANGE && sel->children.size() == 2) {
+											has_part_select = true;
+											break;
+										}
+									}
+								}
 
-							if (is_param_query && param_last_sel && param_last_sel->type == AST_RANGE &&
-									param_last_sel->children.size() == 2 && param_idx_dims >= 1 && param_idx_dims <= dims) {
-								while (param_last_sel->simplify(true, stage, -1, false)) { }
-								int total_dims = (dims - param_idx_dims) + 1;
-								if (dim < 1 || dim > total_dims)
-									input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", dim, id_ast->str, total_dims);
-								if (dim == 1) {
-									expr_dimensions = total_dims;
-									expr_unpacked_dimensions = 0;
-									if (param_last_sel->range_valid) {
-										right = low = param_last_sel->range_right;
-										left = high = param_last_sel->range_left;
-										if (param_last_sel->range_swapped)
-											std::swap(left, right);
-									} else {
-										int sel_width = 1;
-										if (!try_determine_range_width(param_last_sel, sel_width))
-											input_error("Unsupported expression on dynamic range select on parameter `%s'!\n", id_ast->str);
-										right = low = 0;
-										left = high = sel_width - 1;
+								int eff_idx_dims = from_struct_array_member ? 0 : (is_param_query ? param_idx_dims : (int)buf->integer);
+								if (has_part_select) {
+									std::vector<AstNode::dimension_t> preserved;
+									for (AstNode *sel : param_sels) {
+										if (sel->type == AST_RANGE && sel->children.size() == 2) {
+											while (sel->simplify(true, stage, -1, false)) { }
+											if (sel->range_valid) {
+												preserved.push_back({sel->range_right, sel->range_left - sel->range_right + 1, sel->range_swapped});
+											} else {
+												int sel_width = 1;
+												if (!try_determine_range_width(sel, sel_width))
+													input_error("Unsupported expression on dynamic range select on parameter `%s'!\n", id_ast->str);
+												preserved.push_back({0, sel_width, false});
+											}
+										}
 									}
 									for (int i = param_idx_dims; i < dims; i++)
-										mem_depth *= id_ast->dimensions[i].range_width;
-								} else {
-									int target_dim = param_idx_dims + dim - 1;
-									expr_dimensions = dims - target_dim + 1;
+										preserved.push_back(id_ast->dimensions[i]);
+									int total_dims = GetSize(preserved);
+									if (req_dim < 1 || req_dim > total_dims)
+										input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", req_dim, id_ast->str, total_dims);
+									expr_dimensions = total_dims - req_dim + 1;
 									expr_unpacked_dimensions = 0;
-									right = low  = id_ast->dimensions[target_dim - 1].range_right;
-									left  = high = low + id_ast->dimensions[target_dim - 1].range_width - 1;
-									if (id_ast->dimensions[target_dim - 1].range_swapped)
+									right = low = preserved[req_dim - 1].range_right;
+									left = high = low + preserved[req_dim - 1].range_width - 1;
+									if (preserved[req_dim - 1].range_swapped)
 										std::swap(left, right);
-									for (int i = target_dim; i < dims; i++)
-										mem_depth *= id_ast->dimensions[i].range_width;
-								}
-							} else if (is_param_query && param_idx_dims == dims) {
-								if (dim != 1)
-									input_error("Dimension %d out of range in `%s', as it only has 1 dimensions!\n", dim, id_ast->str);
-								right = low = 0;
-								left = high = 0;
-								expr_dimensions = 1;
-								expr_unpacked_dimensions = 0;
-							} else {
-								// The dimension of the original array expression is saved in the 'integer' field.
-								// For struct array member selects, buf->integer counts outer array indices
-								// (for memory access checks), not dimensions sliced off the member itself.
-								if (!from_struct_array_member)
-									dim += is_param_query ? param_idx_dims : buf->integer;
-
-								// TODO: IEEE Std 1800-2017 20.7: "If the first argument to an array query function would cause $dimensions to return 0
-								// or if the second argument is out of range, then 'x shall be returned."
-								if (dim < 1 || dim > dims)
-									input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", dim, id_ast->str, dims);
-
-								expr_dimensions = dims - dim + 1;
-								expr_unpacked_dimensions = std::max(id_ast->unpacked_dimensions - dim + 1, 0);
-
-								right = low  = id_ast->dimensions[dim - 1].range_right;
-								left  = high = low + id_ast->dimensions[dim - 1].range_width - 1;
-								if (id_ast->dimensions[dim - 1].range_swapped) {
-									std::swap(left, right);
-								}
-								for (int i = dim; i < dims; i++) {
-									mem_depth *= id_ast->dimensions[i].range_width;
+									for (int i = req_dim; i < total_dims; i++)
+										mem_depth *= preserved[i].range_width;
+									width = high - low + 1;
+								} else if (eff_idx_dims == dims) {
+									if (req_dim != 1)
+										input_error("Dimension %d out of range in `%s', as it only has 1 dimensions!\n", req_dim, id_ast->str);
+									right = low = 0;
+									left = high = 0;
+									expr_dimensions = 1;
+									expr_unpacked_dimensions = 0;
+									width = 1;
+								} else {
+									eval_from_dimensions(id_ast, req_dim + eff_idx_dims);
 								}
 							}
-							width = high - low + 1;
 						} else if (id_ast->type == AST_WIRE || id_ast->type == AST_MEMORY) {
 							// Check for item in packed struct / union
 							AstNode *item_node = buf->get_struct_member();
@@ -5224,41 +5249,7 @@ skip_dynamic_range_lvalue_expansion:;
 							int dims = GetSize(id_ast->dimensions);
 							auto slice_it = !from_struct_array_member ? buf->attributes.find(packed_slice_dims_attr()) : buf->attributes.end();
 							if (slice_it != buf->attributes.end() && slice_it->second->type == AST_MULTIRANGE && !slice_it->second->children.empty()) {
-								auto &sdims = slice_it->second->children;
-								int total_dims = GetSize(sdims);
-								if (req_dim < 1 || req_dim > total_dims)
-									input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", req_dim, id_ast->str, total_dims);
-								std::vector<int> dim_widths(total_dims, 1);
-								int dyn_idx = -1;
-								int known_prod = 1;
-								for (int i = 0; i < total_dims; i++) {
-									auto *r = sdims[i].get();
-									if (r->integer != 0) {
-										dyn_idx = i;
-									} else {
-										while (!r->range_valid && r->simplify(true, stage, -1, false)) { }
-										dim_widths[i] = r->range_left - r->range_right + 1;
-										known_prod *= dim_widths[i];
-									}
-								}
-								if (dyn_idx >= 0 && arg_width > 0 && known_prod > 0)
-									dim_widths[dyn_idx] = arg_width / known_prod;
-								expr_dimensions = total_dims - req_dim + 1;
-								expr_unpacked_dimensions = 0;
-								width = dim_widths[req_dim - 1];
-								mem_depth = 1;
-								for (int i = req_dim; i < total_dims; i++)
-									mem_depth *= dim_widths[i];
-								auto *qr = sdims[req_dim - 1].get();
-								if (qr->integer != 0) {
-									right = low = 0;
-									left = high = width - 1;
-								} else {
-									right = low = qr->range_right;
-									left = high = qr->range_left;
-									if (qr->range_swapped)
-										std::swap(left, right);
-								}
+								eval_from_slice_dims(id_ast, slice_it->second.get(), arg_width);
 							} else if (str == "\\$bits" && !buf->children.empty() && idx_dims >= id_ast->unpacked_dimensions && arg_width > 0) {
 								// Any packed bit-select, part-select, or fully-unpacked-indexed
 								// slice has bit width given directly by detectSignWidth().
