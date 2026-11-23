@@ -3551,6 +3551,20 @@ single_arg:
 			err_at_loc(@1, "Type argument is only supported for array/bit query system functions.");
 		(void)extra->astbuf2.reset();
 		call->children.push_back(std::move($1));
+	} |
+	enum_type {
+		if (!mode->sv)
+			err_at_loc(@1, "Type arguments are only supported in SystemVerilog mode.");
+		auto *call = extra->ast_stack.back();
+		if (!call->children.empty() && call->children.back()->type == AST_ENUM)
+			call->children.pop_back();
+		extra->astbuf1.reset();
+		if (call->type != AST_FCALL || !(call->str == "\\$bits" || call->str == "\\$size" ||
+				call->str == "\\$left" || call->str == "\\$right" || call->str == "\\$high" ||
+				call->str == "\\$low" || call->str == "\\$increment" ||
+				call->str == "\\$dimensions" || call->str == "\\$unpacked_dimensions"))
+			err_at_loc(@1, "Type argument is only supported for array/bit query system functions.");
+		call->children.push_back(std::move($1));
 	};
 
 module_gen_body:

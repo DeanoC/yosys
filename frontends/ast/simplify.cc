@@ -517,21 +517,9 @@ static RTLIL::IdString struct_array_member_width_attr()
 	return attr;
 }
 
-static RTLIL::IdString packed_part_select_attr()
+static RTLIL::IdString packed_slice_dims_attr()
 {
-	static RTLIL::IdString attr = intern_attr_name("\\sv_packed_part_select");
-	return attr;
-}
-
-static RTLIL::IdString packed_part_left_attr()
-{
-	static RTLIL::IdString attr = intern_attr_name("\\sv_packed_part_left");
-	return attr;
-}
-
-static RTLIL::IdString packed_part_right_attr()
-{
-	static RTLIL::IdString attr = intern_attr_name("\\sv_packed_part_right");
+	static RTLIL::IdString attr = intern_attr_name("\\sv_packed_slice_dims");
 	return attr;
 }
 
@@ -3016,16 +3004,43 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 		// Save original number of dimensions for $size() etc.
 		integer = dims_sel;
 
-		// Distinguish a packed part-select (which preserves the selected dimension)
-		// from a scalar index (which consumes it) before flattening.
-		AstNode *last_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.back().get() : children[0].get();
-		if (dims_sel > id2ast->unpacked_dimensions && last_sel->type == AST_RANGE && last_sel->children.size() == 2) {
-			set_attribute(packed_part_select_attr(), mkconst_int(location, 1, false));
-			if (last_sel->range_valid) {
-				int part_left = last_sel->range_swapped ? last_sel->range_right : last_sel->range_left;
-				int part_right = last_sel->range_swapped ? last_sel->range_left : last_sel->range_right;
-				set_attribute(packed_part_left_attr(), mkconst_int(location, part_left, true));
-				set_attribute(packed_part_right_attr(), mkconst_int(location, part_right, true));
+		// Record every preserved packed dimension whenever any packed selector is a
+		// range part-select (which preserves that dimension rather than consuming it).
+		int total_decl_dims = GetSize(id2ast->dimensions);
+		if (dims_sel > id2ast->unpacked_dimensions && dims_sel <= total_decl_dims) {
+			bool has_part_select = false;
+			for (int k = id2ast->unpacked_dimensions; k < dims_sel; k++) {
+				AstNode *sel = children[0]->type == AST_MULTIRANGE ? children[0]->children[k].get() : children[0].get();
+				if (sel->type == AST_RANGE && sel->children.size() == 2) {
+					has_part_select = true;
+					break;
+				}
+			}
+			if (has_part_select) {
+				auto slice_dims = std::make_unique<AstNode>(location, AST_MULTIRANGE);
+				for (int k = id2ast->unpacked_dimensions; k < dims_sel; k++) {
+					AstNode *sel = children[0]->type == AST_MULTIRANGE ? children[0]->children[k].get() : children[0].get();
+					if (sel->type == AST_RANGE && sel->children.size() == 2) {
+						if (sel->range_valid) {
+							int l = sel->range_swapped ? sel->range_right : sel->range_left;
+							int r = sel->range_swapped ? sel->range_left : sel->range_right;
+							slice_dims->children.push_back(make_range(location, l, r));
+						} else {
+							auto dyn = make_range(location, 0, 0);
+							dyn->integer = 1; // dynamic indexed part-select (+: / -:)
+							slice_dims->children.push_back(std::move(dyn));
+						}
+					}
+				}
+				for (int k = dims_sel; k < total_decl_dims; k++) {
+					const auto &d = id2ast->dimensions[k];
+					int low_b = d.range_right;
+					int high_b = low_b + d.range_width - 1;
+					int l = d.range_swapped ? low_b : high_b;
+					int r = d.range_swapped ? high_b : low_b;
+					slice_dims->children.push_back(make_range(location, l, r));
+				}
+				set_attribute(packed_slice_dims_attr(), std::move(slice_dims));
 			}
 		}
 
@@ -4927,32 +4942,42 @@ skip_dynamic_range_lvalue_expansion:;
 							// (for memory access checks), not dimensions sliced off the member itself.
 							int idx_dims = from_struct_array_member ? 0 : (int)buf->integer;
 							int dims = GetSize(id_ast->dimensions);
-							bool is_part_select = !from_struct_array_member && buf->attributes.count(packed_part_select_attr()) &&
-									idx_dims > id_ast->unpacked_dimensions && idx_dims <= dims && arg_width > 0;
-
-							if (is_part_select) {
-								int total_dims = (dims - idx_dims) + 1;
+							auto slice_it = !from_struct_array_member ? buf->attributes.find(packed_slice_dims_attr()) : buf->attributes.end();
+							if (slice_it != buf->attributes.end() && slice_it->second->type == AST_MULTIRANGE && !slice_it->second->children.empty()) {
+								auto &sdims = slice_it->second->children;
+								int total_dims = GetSize(sdims);
 								if (req_dim < 1 || req_dim > total_dims)
 									input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", req_dim, id_ast->str, total_dims);
-								if (req_dim == 1) {
-									int inner_stride = 1;
-									for (int i = idx_dims; i < dims; i++)
-										inner_stride *= id_ast->dimensions[i].range_width;
-									width = inner_stride > 0 ? (arg_width / inner_stride) : arg_width;
-									mem_depth = inner_stride;
-									expr_dimensions = total_dims;
-									expr_unpacked_dimensions = 0;
-									if (buf->attributes.count(packed_part_left_attr()) && buf->attributes.count(packed_part_right_attr())) {
-										left = buf->attributes.at(packed_part_left_attr())->asInt(true);
-										right = buf->attributes.at(packed_part_right_attr())->asInt(true);
-										high = std::max(left, right);
-										low = std::min(left, right);
+								std::vector<int> dim_widths(total_dims, 1);
+								int dyn_idx = -1;
+								int known_prod = 1;
+								for (int i = 0; i < total_dims; i++) {
+									auto *r = sdims[i].get();
+									if (r->integer != 0) {
+										dyn_idx = i;
 									} else {
-										right = low = 0;
-										left = high = width - 1;
+										while (!r->range_valid && r->simplify(true, stage, -1, false)) { }
+										dim_widths[i] = r->range_left - r->range_right + 1;
+										known_prod *= dim_widths[i];
 									}
+								}
+								if (dyn_idx >= 0 && arg_width > 0 && known_prod > 0)
+									dim_widths[dyn_idx] = arg_width / known_prod;
+								expr_dimensions = total_dims - req_dim + 1;
+								expr_unpacked_dimensions = 0;
+								width = dim_widths[req_dim - 1];
+								mem_depth = 1;
+								for (int i = req_dim; i < total_dims; i++)
+									mem_depth *= dim_widths[i];
+								auto *qr = sdims[req_dim - 1].get();
+								if (qr->integer != 0) {
+									right = low = 0;
+									left = high = width - 1;
 								} else {
-									eval_from_dimensions(id_ast, idx_dims + req_dim - 1);
+									right = low = qr->range_right;
+									left = high = qr->range_left;
+									if (qr->range_swapped)
+										std::swap(left, right);
 								}
 							} else if (str == "\\$bits" && !buf->children.empty() && idx_dims >= id_ast->unpacked_dimensions && arg_width > 0) {
 								// Any packed bit-select, part-select, or fully-unpacked-indexed

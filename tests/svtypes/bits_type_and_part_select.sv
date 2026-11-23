@@ -86,6 +86,17 @@ module top (
 	localparam int D_FPS    = $dimensions(f[9:8]);
 	localparam int L_FPS    = $left(f[9:8]);
 	localparam int R_FPS    = $right(f[9:8]);
+	localparam int D_2SL    = $dimensions(p2d[2:1][5:2]);
+	localparam int S_2SL1   = $size(p2d[2:1][5:2], 1);
+	localparam int S_2SL2   = $size(p2d[2:1][5:2], 2);
+	localparam int L_2SL2   = $left(p2d[2:1][5:2], 2);
+	localparam int R_2SL2   = $right(p2d[2:1][5:2], 2);
+	localparam int B_2SL    = $bits(p2d[2:1][5:2]);
+	localparam int D_SLBIT  = $dimensions(p2d[2:1][3]);
+	localparam int S_SLBIT  = $size(p2d[2:1][3]);
+	localparam int B_IENUM  = $bits(enum logic [2:0] { IE0, IE1 });
+	localparam int B_UENUM  = $bits(enum { IU0, IU1 });
+	localparam int B_BENUM  = $bits(enum byte { IB0, IB1 });
 
 	// Wider LHS context must not pollute $bits width_hint
 	logic [31:0] wide_bits;
@@ -134,5 +145,9 @@ module top (
 	always_comb assert(S_SL11_1 == 1 && S_SL11_2 == 8);
 	always_comb assert(D_ELEM == 1 && S_ELEM == 8);
 	always_comb assert(D_FPS == 1 && L_FPS == 9 && R_FPS == 8);
+	always_comb assert(D_2SL == 2 && S_2SL1 == 2 && S_2SL2 == 4);
+	always_comb assert(L_2SL2 == 5 && R_2SL2 == 2 && B_2SL == 8);
+	always_comb assert(D_SLBIT == 1 && S_SLBIT == 2);
+	always_comb assert(B_IENUM == 3 && B_UENUM == 32 && B_BENUM == 8);
 	always_comb assert(wide_bits == 32'd2);
 endmodule
