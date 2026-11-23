@@ -268,6 +268,24 @@ static int add_dimension(AstNode *node, AstNode *rnode)
 	return width;
 }
 
+// Rebuild the declared ranges of dimensions [begin_dim, end_dim) of a resolved
+// declaration, e.g. after its packed ranges were flattened into a single range.
+static std::unique_ptr<AstNode> dimensions_to_multirange(AstSrcLocType loc, const AstNode *node, int begin_dim, int end_dim)
+{
+	auto multirange = std::make_unique<AstNode>(loc, AST_MULTIRANGE);
+	for (int d = begin_dim; d < end_dim; d++) {
+		const auto &dim = node->dimensions[d];
+		int low = dim.range_right;
+		int high = low + dim.range_width - 1;
+		auto range = make_range(loc, dim.range_swapped ? low : high, dim.range_swapped ? high : low);
+		range->range_left = high;
+		range->range_right = low;
+		range->range_swapped = dim.range_swapped;
+		multirange->children.push_back(std::move(range));
+	}
+	return multirange;
+}
+
 [[noreturn]] static void struct_array_packing_error(AstNode *node)
 {
 	node->input_error("Unpacked array in packed struct/union member %s\n", node->str);
@@ -489,6 +507,9 @@ static int size_packed_struct(AstNode *snode, int base_offset)
 	snode->range_right = base_offset;
 	snode->range_left = base_offset + width - 1;
 	snode->range_valid = true;
+	// A struct/union is one packed dimension. It is sized again when nested in
+	// another struct/union, so replace rather than append the dimension.
+	snode->dimensions.clear();
 	snode->dimensions.push_back({ 0, width, false });
 
 	return width;
@@ -2278,8 +2299,18 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			// Pretend it's just a wire in order to resolve the type.
 			type = AST_WIRE;
 			while (is_custom_type && simplify(const_fold, stage, width_hint, sign_hint)) {};
-			if (type == AST_WIRE)
+			if (type == AST_WIRE) {
 				type = AST_STRUCT_ITEM;
+				// A typedef alias keeps the template's dimensions, but size_packed_struct()
+				// derives member dimensions from the range children. Turn the dimensions
+				// back into ranges so they are not added twice and a multi-dimensional
+				// alias keeps its shape.
+				if (!dimensions.empty() && !children.empty() && children[0]->type == AST_RANGE) {
+					if (GetSize(dimensions) > 1)
+						children[0] = dimensions_to_multirange(location, this, 0, GetSize(dimensions));
+					dimensions.clear();
+				}
+			}
 
 			did_something = true;
 		}
@@ -2788,23 +2819,11 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			// If template_node already flattened multi-dimensional ranges into dimensions,
 			// restore them as AST_MULTIRANGE before prepending additional dimensions.
 			if ((add_packed_dimensions || type == AST_MEMORY) && !newNode->dimensions.empty()) {
-				auto rebuild_multirange = [&](int begin_dim, int end_dim) {
-					auto mr = std::make_unique<AstNode>(location, AST_MULTIRANGE);
-					for (int d = begin_dim; d < end_dim; d++) {
-						const auto &dim = newNode->dimensions[d];
-						int low = dim.range_right;
-						int high = low + dim.range_width - 1;
-						int left = dim.range_swapped ? low : high;
-						int right = dim.range_swapped ? high : low;
-						mr->children.push_back(make_range(location, left, right));
-					}
-					return mr;
-				};
 				int packed_dims = GetSize(newNode->dimensions) - newNode->unpacked_dimensions;
 				if (packed_dims > 1 && !newNode->children.empty())
-					newNode->children[0] = rebuild_multirange(newNode->unpacked_dimensions, GetSize(newNode->dimensions));
+					newNode->children[0] = dimensions_to_multirange(location, newNode.get(), newNode->unpacked_dimensions, GetSize(newNode->dimensions));
 				if (newNode->unpacked_dimensions > 1 && GetSize(newNode->children) >= 2)
-					newNode->children[1] = rebuild_multirange(0, newNode->unpacked_dimensions);
+					newNode->children[1] = dimensions_to_multirange(location, newNode.get(), 0, newNode->unpacked_dimensions);
 			}
 
 			// Add packed dimensions.

@@ -12,6 +12,10 @@ module sub #(parameter int W = 0, parameter int V = 0) (
 	assign ov = V;
 endmodule
 
+module bits_pass (input logic [31:0] i, output logic [7:0] o);
+	assign o = i[7:0];
+endmodule
+
 module top (
 	input  logic [9:0] f,
 	input  logic [2:0] idx,
@@ -123,6 +127,41 @@ module top (
 	logic [31:0] wide_bits;
 	assign wide_bits = $bits(f[9:8]);
 
+	// Typedef aliases as packed struct members: one dimension per packed range
+	// (multi-dimensional aliases keep their shape), so member selects and
+	// queries use the alias's own layout.
+	typedef logic [7:0] td_byte_t;
+	typedef logic [1:0][3:0] td_nib2_t;
+	typedef logic td_flag_t;
+	typedef struct packed { logic [3:0] hi; logic [3:0] lo; } td_in_t;
+	typedef struct packed { logic a; td_byte_t t; } td_s_t;
+	typedef struct packed { td_nib2_t n; t_t e; td_flag_t fl; td_in_t i; } td_s2_t;
+	td_s_t  td_s;
+	td_s2_t td_s2;
+	assign td_s  = 9'h1A5;
+	assign td_s2 = {8'h5C, 3'd1, 1'b1, 8'h3E};
+	localparam int D_TD_T  = $dimensions(td_s.t);
+	localparam int S_TD_T  = $size(td_s.t);
+	localparam int D_TD_N  = $dimensions(td_s2.n);
+	localparam int S_TD_N1 = $size(td_s2.n, 1);
+	localparam int S_TD_N2 = $size(td_s2.n, 2);
+	localparam int D_TD_E  = $dimensions(td_s2.e);
+	localparam int D_TD_I  = $dimensions(td_s2.i);
+	localparam int S_TD_I  = $size(td_s2.i);
+
+	// Inline struct/enum type arguments inside another declaration must leave
+	// that declaration intact: net initialisers, parameter lists, cell
+	// parameters and port connections, each followed by another declarator.
+	wire [7:0] ta_w1 = $bits(struct packed { logic [2:0] x; logic y; }), ta_w2 = 8'h9C;
+	wire [7:0] ta_w3 = $bits(enum logic [4:0] { TW0, TW1 }), ta_w4 = 8'hC3;
+	localparam logic [3:0] TA_P1 = $bits(struct packed { logic [2:0] x; }), TA_P2 = 5'h1F;
+	localparam logic [3:0] TA_P3 = $bits(enum logic [1:0] { TP0, TP1 }), TA_P4 = 5'h1E;
+	logic [7:0] ta_nw, ta_nv, ta_pw, ta_pv, ta_e, ta_s, ta_s2;
+	sub #(.W($bits(enum logic [5:0] { TC0, TC1 })), .V(7)) u_ta_named (.ow(ta_nw), .ov(ta_nv));
+	sub #($bits(struct packed { logic [3:0] x; }), 9) u_ta_pos (.ow(ta_pw), .ov(ta_pv));
+	bits_pass u_ta_e (.i($bits(enum logic [4:0] { TQ0, TQ1 })), .o(ta_e));
+	bits_pass u_ta_s (.i($bits(struct packed { logic [5:0] x; })), .o(ta_s)), u_ta_s2 (.i(32'd11), .o(ta_s2));
+
 	always_comb assert(o == 8'd3);
 	always_comb assert(p == 8'd2);
 	always_comb assert(sub_w == 8'd3);
@@ -174,6 +213,18 @@ module top (
 	always_comb assert(S_ASC1 == 2 && S_ASC2 == 8 && L_ASC1 == 1 && R_ASC1 == 2 && L_ASC2 == 0 && R_ASC2 == 7 && B_ASC == 16);
 	always_comb assert(D_DYN2 == 2 && S_DYN2_1 == 2 && S_DYN2_2 == 3 && B_DYN2 == 6);
 	always_comb assert(wide_bits == 32'd2);
+	always_comb assert(td_s.t == 8'hA5 && td_s.t[3] == 1'b0 && td_s.t[0] == 1'b1 && td_s.t[7:4] == 4'hA);
+	always_comb assert(D_TD_T == 1 && S_TD_T == 8);
+	always_comb assert(td_s2.n == 8'h5C && td_s2.n[1] == 4'h5 && td_s2.n[0] == 4'hC);
+	always_comb assert(D_TD_N == 2 && S_TD_N1 == 2 && S_TD_N2 == 4);
+	always_comb assert(td_s2.e == B && td_s2.e[0] == 1'b1 && td_s2.e[2:1] == 2'b00 && D_TD_E == 1);
+	always_comb assert(td_s2.fl == 1'b1);
+	always_comb assert(td_s2.i.hi == 4'h3 && td_s2.i.lo == 4'hE && td_s2.i[4] == 1'b1 && td_s2.i[0] == 1'b0);
+	always_comb assert(D_TD_I == 1 && S_TD_I == 8);
+	always_comb assert(ta_w1 == 8'd4 && ta_w2 == 8'h9C && ta_w3 == 8'd5 && ta_w4 == 8'hC3);
+	always_comb assert(TA_P1 == 4'd3 && TA_P2 == 4'hF && TA_P3 == 4'd2 && TA_P4 == 4'hE);
+	always_comb assert(ta_nw == 8'd6 && ta_nv == 8'd7 && ta_pw == 8'd4 && ta_pv == 8'd9);
+	always_comb assert(ta_e == 8'd5 && ta_s == 8'd6 && ta_s2 == 8'd11);
 	s_alias_t s_alias_inst;
 	assign s_alias_inst = '{a: 1'b1, b: 6'h2A};
 	always_comb assert(B_SALIAS == 7 && B_SALARR == 14 && s_alias_inst.b == 6'h2A);
