@@ -82,6 +82,13 @@
 			std::unique_ptr<AstNode> astbuf1, astbuf2, astbuf3;
 			AstNode* cell_hack;
 			AstNode* member_hack;
+			// Enclosing declaration state set aside while an inline struct/enum
+			// type argument (e.g. `$bits(struct packed {...})`) reuses the buffers.
+			struct DeclBuffers {
+				std::unique_ptr<AstNode> astbuf1, astbuf2, astbuf3;
+				AstNode *cell_hack, *member_hack;
+			};
+			std::vector<DeclBuffers> saved_decl_buffers;
 			struct AstNode *current_function_or_task;
 			struct AstNode *current_ast, *current_ast_mod;
 			int current_function_or_task_port_id;
@@ -95,6 +102,8 @@
 
 			AstNode* saveChild(std::unique_ptr<AstNode> child);
 			AstNode* pushChild(std::unique_ptr<AstNode> child);
+			void saveDeclBuffers();
+			void restoreDeclBuffers();
 			void addWiretypeNode(std::string *name, AstNode* node);
 			void addTypedefNode(std::string *name, std::unique_ptr<AstNode> node);
 			void registerImportedPackageTypes(const AstNode *import_node);
@@ -282,6 +291,25 @@
 			auto* child_leaky = saveChild(std::move(child));
 			ast_stack.push_back(child_leaky);
 			return child_leaky;
+		}
+
+		// struct_type and enum_type build their nodes in astbuf1/astbuf2/astbuf3 and
+		// cell_hack/member_hack. Set the enclosing declaration's state aside (and
+		// clear it) while they are parsed as an inline type argument.
+		void ParseState::saveDeclBuffers() {
+			saved_decl_buffers.push_back({std::move(astbuf1), std::move(astbuf2), std::move(astbuf3), cell_hack, member_hack});
+			cell_hack = nullptr;
+			member_hack = nullptr;
+		}
+		void ParseState::restoreDeclBuffers() {
+			log_assert(!saved_decl_buffers.empty());
+			auto &saved = saved_decl_buffers.back();
+			astbuf1 = std::move(saved.astbuf1);
+			astbuf2 = std::move(saved.astbuf2);
+			astbuf3 = std::move(saved.astbuf3);
+			cell_hack = saved.cell_hack;
+			member_hack = saved.member_hack;
+			saved_decl_buffers.pop_back();
 		}
 
 		void ParseState::addWiretypeNode(std::string *name, AstNode* node)
@@ -3563,6 +3591,82 @@ arg_list2:
 single_arg:
 	expr {
 		extra->ast_stack.back()->children.push_back(std::move($1));
+	} |
+	typedef_base_type range_or_multirange {
+		if (!mode->sv)
+			err_at_loc(@1, "Type arguments are only supported in SystemVerilog mode.");
+		auto *call = extra->ast_stack.back();
+		if (call->type != AST_FCALL || !(call->str == "\\$bits" || call->str == "\\$size" ||
+				call->str == "\\$left" || call->str == "\\$right" || call->str == "\\$high" ||
+				call->str == "\\$low" || call->str == "\\$increment" ||
+				call->str == "\\$dimensions" || call->str == "\\$unpacked_dimensions"))
+			err_at_loc(@1, "Type argument is only supported for array/bit query system functions.");
+		auto range = checkRange($1.get(), std::move($2));
+		if (range)
+			$1->children.push_back(std::move(range));
+		call->children.push_back(std::move($1));
+	} |
+	type_arg_save_decl_buffers struct_type range_or_multirange {
+		// struct_type built its node in the declaration buffers; give them back
+		// to the enclosing declaration.
+		extra->restoreDeclBuffers();
+		if (!mode->sv)
+			err_at_loc(@2, "Type arguments are only supported in SystemVerilog mode.");
+		auto *call = extra->ast_stack.back();
+		if (call->type != AST_FCALL || !(call->str == "\\$bits" || call->str == "\\$size" ||
+				call->str == "\\$left" || call->str == "\\$right" || call->str == "\\$high" ||
+				call->str == "\\$low" || call->str == "\\$increment" ||
+				call->str == "\\$dimensions" || call->str == "\\$unpacked_dimensions"))
+			err_at_loc(@2, "Type argument is only supported for array/bit query system functions.");
+		auto range = checkRange($2.get(), std::move($3));
+		if (range)
+			$2->set_attribute(intern_attr_name("\\sv_type_packed_dims"), std::move(range));
+		call->children.push_back(std::move($2));
+	} |
+	type_arg_save_decl_buffers enum_type range_or_multirange {
+		// enum_type built its node in the declaration buffers; give them back
+		// to the enclosing declaration.
+		extra->restoreDeclBuffers();
+		if (!mode->sv)
+			err_at_loc(@2, "Type arguments are only supported in SystemVerilog mode.");
+		auto *call = extra->ast_stack.back();
+		if (!call->children.empty() && call->children.back()->type == AST_ENUM)
+			call->children.pop_back();
+		if (call->type != AST_FCALL || !(call->str == "\\$bits" || call->str == "\\$size" ||
+				call->str == "\\$left" || call->str == "\\$right" || call->str == "\\$high" ||
+				call->str == "\\$low" || call->str == "\\$increment" ||
+				call->str == "\\$dimensions" || call->str == "\\$unpacked_dimensions"))
+			err_at_loc(@2, "Type argument is only supported for array/bit query system functions.");
+		auto range = checkRange($2.get(), std::move($3));
+		if (range) {
+			if ($2->children.empty()) {
+				$2->children.push_back(std::move(range));
+			} else {
+				auto mr = std::make_unique<AstNode>(@$, AST_MULTIRANGE);
+				if (range->type == AST_MULTIRANGE) {
+					for (auto &c : range->children)
+						mr->children.push_back(std::move(c));
+				} else {
+					mr->children.push_back(std::move(range));
+				}
+				if ($2->children[0]->type == AST_MULTIRANGE) {
+					for (auto &c : $2->children[0]->children)
+						mr->children.push_back(std::move(c));
+				} else {
+					mr->children.push_back(std::move($2->children[0]));
+				}
+				$2->children[0] = std::move(mr);
+			}
+		}
+		call->children.push_back(std::move($2));
+	};
+
+// Inline struct/enum type arguments can appear inside another declaration
+// (net/parameter initialisers, cell parameters and port connections), so set
+// that declaration's buffers aside before struct_type/enum_type reuse them.
+type_arg_save_decl_buffers:
+	%empty {
+		extra->saveDeclBuffers();
 	};
 
 module_gen_body:

@@ -268,6 +268,24 @@ static int add_dimension(AstNode *node, AstNode *rnode)
 	return width;
 }
 
+// Rebuild the declared ranges of dimensions [begin_dim, end_dim) of a resolved
+// declaration, e.g. after its packed ranges were flattened into a single range.
+static std::unique_ptr<AstNode> dimensions_to_multirange(AstSrcLocType loc, const AstNode *node, int begin_dim, int end_dim)
+{
+	auto multirange = std::make_unique<AstNode>(loc, AST_MULTIRANGE);
+	for (int d = begin_dim; d < end_dim; d++) {
+		const auto &dim = node->dimensions[d];
+		int low = dim.range_right;
+		int high = low + dim.range_width - 1;
+		auto range = make_range(loc, dim.range_swapped ? low : high, dim.range_swapped ? high : low);
+		range->range_left = high;
+		range->range_right = low;
+		range->range_swapped = dim.range_swapped;
+		multirange->children.push_back(std::move(range));
+	}
+	return multirange;
+}
+
 [[noreturn]] static void struct_array_packing_error(AstNode *node)
 {
 	node->input_error("Unpacked array in packed struct/union member %s\n", node->str);
@@ -489,6 +507,9 @@ static int size_packed_struct(AstNode *snode, int base_offset)
 	snode->range_right = base_offset;
 	snode->range_left = base_offset + width - 1;
 	snode->range_valid = true;
+	// A struct/union is one packed dimension. It is sized again when nested in
+	// another struct/union, so replace rather than append the dimension.
+	snode->dimensions.clear();
 	snode->dimensions.push_back({ 0, width, false });
 
 	return width;
@@ -514,6 +535,12 @@ static RTLIL::IdString struct_array_member_attr()
 static RTLIL::IdString struct_array_member_width_attr()
 {
 	static RTLIL::IdString attr = intern_attr_name("\\sv_struct_array_member_width");
+	return attr;
+}
+
+static RTLIL::IdString packed_slice_dims_attr()
+{
+	static RTLIL::IdString attr = intern_attr_name("\\sv_packed_slice_dims");
 	return attr;
 }
 
@@ -2272,8 +2299,18 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			// Pretend it's just a wire in order to resolve the type.
 			type = AST_WIRE;
 			while (is_custom_type && simplify(const_fold, stage, width_hint, sign_hint)) {};
-			if (type == AST_WIRE)
+			if (type == AST_WIRE) {
 				type = AST_STRUCT_ITEM;
+				// A typedef alias keeps the template's dimensions, but size_packed_struct()
+				// derives member dimensions from the range children. Turn the dimensions
+				// back into ranges so they are not added twice and a multi-dimensional
+				// alias keeps its shape.
+				if (!dimensions.empty() && !children.empty() && children[0]->type == AST_RANGE) {
+					if (GetSize(dimensions) > 1)
+						children[0] = dimensions_to_multirange(location, this, 0, GetSize(dimensions));
+					dimensions.clear();
+				}
+			}
 
 			did_something = true;
 		}
@@ -2714,6 +2751,26 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			// resolved.
 			while (template_node->is_custom_type && template_node->simplify(const_fold, stage, width_hint, sign_hint)) {};
 
+			bool add_packed_dimensions = (type == AST_WIRE && GetSize(children) > 1) || (type == AST_MEMORY && GetSize(children) > 2);
+			if (str.empty() && (add_packed_dimensions || type == AST_MEMORY) &&
+					(template_node->type == AST_STRUCT || template_node->type == AST_UNION)) {
+				auto tmp = template_node->clone();
+				while (tmp->simplify(true, stage, -1, false)) { }
+				int struct_width = tmp->range_valid ? (tmp->range_left - tmp->range_right + 1) : size_packed_struct(tmp.get(), 0);
+				newNode = std::make_unique<AstNode>(location, AST_WIRE, make_range(location, struct_width - 1, 0));
+				newNode->is_logic = true;
+				newNode->is_signed = template_node->is_signed;
+				if (add_packed_dimensions)
+					prepend_ranges(newNode->children[0], children[1].get());
+				if (type == AST_MEMORY) {
+					newNode->children.push_back(children.back()->clone());
+					newNode->type = AST_MEMORY;
+				}
+				newNode->dimensions.clear();
+				newNode->unpacked_dimensions = 0;
+				goto apply_newNode;
+			}
+
 			if (!str.empty() && str[0] == '\\' && (template_node->type == AST_STRUCT || template_node->type == AST_UNION)) {
 				// replace instance with wire representing the packed structure
 				newNode = make_packed_struct(template_node.get(), str, attributes);
@@ -2726,7 +2783,6 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 				// of structs (`e_t arr [1:2]`, `e_t [3:0] arr [1:2]`).
 				// make_packed_struct() only builds one element; attach any packed
 				// and unpacked array dimensions so the dimension pass resolves them.
-				bool add_packed_dimensions = (type == AST_WIRE && GetSize(children) > 1) || (type == AST_MEMORY && GetSize(children) > 2);
 				if (add_packed_dimensions)
 					prepend_ranges(newNode->children[0], children[1].get());
 				if (type == AST_MEMORY) {
@@ -2756,11 +2812,19 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 			// if an enum then add attributes to support simulator tracing
 			newNode->annotateTypedEnums(template_node.get());
 
-			bool add_packed_dimensions = (type == AST_WIRE && GetSize(children) > 1) || (type == AST_MEMORY && GetSize(children) > 2);
-
 			// Cannot add packed dimensions if unpacked dimensions are already specified.
 			if (add_packed_dimensions && newNode->type == AST_MEMORY)
 				input_error("Cannot extend unpacked type `%s' with packed dimensions\n", type_name);
+
+			// If template_node already flattened multi-dimensional ranges into dimensions,
+			// restore them as AST_MULTIRANGE before prepending additional dimensions.
+			if ((add_packed_dimensions || type == AST_MEMORY) && !newNode->dimensions.empty()) {
+				int packed_dims = GetSize(newNode->dimensions) - newNode->unpacked_dimensions;
+				if (packed_dims > 1 && !newNode->children.empty())
+					newNode->children[0] = dimensions_to_multirange(location, newNode.get(), newNode->unpacked_dimensions, GetSize(newNode->dimensions));
+				if (newNode->unpacked_dimensions > 1 && GetSize(newNode->children) >= 2)
+					newNode->children[1] = dimensions_to_multirange(location, newNode.get(), 0, newNode->unpacked_dimensions);
+			}
 
 			// Add packed dimensions.
 			if (add_packed_dimensions) {
@@ -2781,9 +2845,14 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 				newNode->type = type;
 			}
 
-			// Prepare to generate dimensions metadata for the resolved type.
-			newNode->dimensions.clear();
-			newNode->unpacked_dimensions = 0;
+			// Regenerate dimensions metadata only when new dimensions were attached;
+			// otherwise keep any already-flattened multi-dimensional metadata from template_node.
+			if (add_packed_dimensions || type == AST_MEMORY) {
+				newNode->dimensions.clear();
+				newNode->unpacked_dimensions = 0;
+				newNode->basic_prep = false;
+				newNode->range_valid = false;
+			}
 
 			goto apply_newNode;
 		}
@@ -2951,6 +3020,62 @@ bool AstNode::simplify(bool const_fold, int stage, int width_hint, bool sign_hin
 		int dims_sel = children[0]->type == AST_MULTIRANGE ? children[0]->children.size() : 1;
 		// Save original number of dimensions for $size() etc.
 		integer = dims_sel;
+
+		// Record every preserved packed dimension whenever any packed selector is a
+		// range part-select (which preserves that dimension rather than consuming it).
+		int total_decl_dims = GetSize(id2ast->dimensions);
+		if (dims_sel > id2ast->unpacked_dimensions && dims_sel <= total_decl_dims) {
+			bool has_part_select = false;
+			for (int k = id2ast->unpacked_dimensions; k < dims_sel; k++) {
+				AstNode *sel = children[0]->type == AST_MULTIRANGE ? children[0]->children[k].get() : children[0].get();
+				if (sel->type == AST_RANGE && sel->children.size() == 2) {
+					has_part_select = true;
+					break;
+				}
+			}
+			if (has_part_select) {
+				auto slice_dims = std::make_unique<AstNode>(location, AST_MULTIRANGE);
+				for (int k = id2ast->unpacked_dimensions; k < dims_sel; k++) {
+					AstNode *sel = children[0]->type == AST_MULTIRANGE ? children[0]->children[k].get() : children[0].get();
+					if (sel->type == AST_RANGE && sel->children.size() == 2) {
+						if (sel->range_valid) {
+							int l = sel->range_swapped ? sel->range_right : sel->range_left;
+							int r = sel->range_swapped ? sel->range_left : sel->range_right;
+							auto rn = make_range(location, l, r);
+							rn->range_valid = true;
+							rn->range_left = sel->range_left;
+							rn->range_right = sel->range_right;
+							rn->range_swapped = sel->range_swapped;
+							slice_dims->children.push_back(std::move(rn));
+						} else {
+							int dyn_w = 1;
+							bool ok = try_determine_range_width(sel, dyn_w);
+							auto rn = make_range(location, ok ? (dyn_w - 1) : 0, 0);
+							rn->range_valid = true;
+							rn->range_left = ok ? (dyn_w - 1) : 0;
+							rn->range_right = 0;
+							rn->range_swapped = false;
+							rn->integer = ok ? 0 : 1;
+							slice_dims->children.push_back(std::move(rn));
+						}
+					}
+				}
+				for (int k = dims_sel; k < total_decl_dims; k++) {
+					const auto &d = id2ast->dimensions[k];
+					int low_b = d.range_right;
+					int high_b = low_b + d.range_width - 1;
+					int l = d.range_swapped ? low_b : high_b;
+					int r = d.range_swapped ? high_b : low_b;
+					auto rn = make_range(location, l, r);
+					rn->range_valid = true;
+					rn->range_left = high_b;
+					rn->range_right = low_b;
+					rn->range_swapped = d.range_swapped;
+					slice_dims->children.push_back(std::move(rn));
+				}
+				set_attribute(packed_slice_dims_attr(), std::move(slice_dims));
+			}
+		}
 
 		// Split access into unpacked and packed parts.
 		std::unique_ptr<AstNode> unpacked_range = nullptr;
@@ -4777,65 +4902,155 @@ skip_dynamic_range_lvalue_expansion:;
 				int result, high = 0, low = 0, left = 0, right = 0, width = 1; // defaults for a simple wire
 				int expr_dimensions = 0, expr_unpacked_dimensions = 0;
 				AstNode *id_ast = nullptr;
+				int req_dim = dim;
 
-				buf->detectSignWidth(width_hint, sign_hint);
+				auto eval_from_dimensions = [&](AstNode *target, int target_dim) {
+					int dims = GetSize(target->dimensions);
+					// TODO: IEEE Std 1800-2017 20.7: "If the first argument to an array query function would cause $dimensions to return 0
+					// or if the second argument is out of range, then 'x shall be returned."
+					if (target_dim < 1 || target_dim > dims)
+						input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", target_dim, target->str, dims);
 
-				if (buf->type == AST_IDENTIFIER) {
-					id_ast = buf->id2ast;
-					if (id_ast == nullptr && current_scope.count(buf->str))
-						id_ast = current_scope.at(buf->str);
-					if (!id_ast)
-						input_error("Failed to resolve identifier %s for width detection!\n", buf->str);
+					expr_dimensions = dims - target_dim + 1;
+					expr_unpacked_dimensions = std::max(target->unpacked_dimensions - target_dim + 1, 0);
 
-					auto member_select_width = buf->attributes.find(struct_array_member_width_attr());
-					if (member_select_width != buf->attributes.end()) {
-						// Explicit member bit/part selects already have a packed result
-						// width, independent of the member's declared dimensions.
-						width = member_select_width->second->asInt(false);
-						left = high = width - 1;
-						right = low = 0;
-						expr_dimensions = 1;
-					} else if (id_ast->type == AST_WIRE || id_ast->type == AST_MEMORY) {
-						// Check for item in packed struct / union
-						AstNode *item_node = buf->get_struct_member();
-						bool from_struct_array_member = false;
-						if (!item_node && buf->attributes.count(struct_array_member_attr())) {
-							item_node = buf->attributes.at(struct_array_member_attr()).get();
-							from_struct_array_member = true;
-						}
-						if (item_node)
-							id_ast = item_node;
-
-						// The dimension of the original array expression is saved in the 'integer' field.
-						// For struct array member selects, buf->integer counts outer array indices
-						// (for memory access checks), not dimensions sliced off the member itself.
-						if (!from_struct_array_member)
-							dim += buf->integer;
-
-						int dims = GetSize(id_ast->dimensions);
-						// TODO: IEEE Std 1800-2017 20.7: "If the first argument to an array query function would cause $dimensions to return 0
-						// or if the second argument is out of range, then 'x shall be returned."
-						if (dim < 1 || dim > dims)
-							input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", dim, id_ast->str, dims);
-
-						expr_dimensions = dims - dim + 1;
-						expr_unpacked_dimensions = std::max(id_ast->unpacked_dimensions - dim + 1, 0);
-
-						right = low  = id_ast->dimensions[dim - 1].range_right;
-						left  = high = low + id_ast->dimensions[dim - 1].range_width - 1;
-						if (id_ast->dimensions[dim - 1].range_swapped) {
-							std::swap(left, right);
-						}
-						for (int i = dim; i < dims; i++) {
-							mem_depth *= id_ast->dimensions[i].range_width;
-						}
+					right = low  = target->dimensions[target_dim - 1].range_right;
+					left  = high = low + target->dimensions[target_dim - 1].range_width - 1;
+					if (target->dimensions[target_dim - 1].range_swapped) {
+						std::swap(left, right);
+					}
+					for (int i = target_dim; i < dims; i++) {
+						mem_depth *= target->dimensions[i].range_width;
 					}
 					width = high - low + 1;
+				};
+
+				if (buf->type == AST_WIRE || buf->type == AST_MEMORY || buf->type == AST_STRUCT || buf->type == AST_UNION) {
+					while (buf->simplify(true, stage, -1, false)) { }
+					if (buf->type == AST_STRUCT || buf->type == AST_UNION) {
+						int struct_w = buf->range_valid ? (buf->range_left - buf->range_right + 1) : size_packed_struct(buf.get(), 0);
+						auto pdims_it = buf->attributes.find(intern_attr_name("\\sv_type_packed_dims"));
+						if (pdims_it != buf->attributes.end()) {
+							auto wnode = std::make_unique<AstNode>(location, AST_WIRE, make_range(location, struct_w - 1, 0));
+							prepend_ranges(wnode->children[0], pdims_it->second.get());
+							while (wnode->simplify(true, stage, -1, false)) { }
+							eval_from_dimensions(wnode.get(), req_dim);
+						} else {
+							if (req_dim != 1)
+								input_error("Dimension %d out of range in struct/union type, as it only has 1 dimensions!\n", req_dim);
+							width = struct_w;
+							right = low = 0;
+							left = high = width - 1;
+							expr_dimensions = 1;
+							expr_unpacked_dimensions = 0;
+						}
+					} else {
+						eval_from_dimensions(buf.get(), req_dim);
+					}
 				} else {
-					width = width_hint;
-					right = low  = 0;
-					left  = high = width - 1;
-					expr_dimensions = 1;
+					int arg_width = -1;
+					bool arg_sign = true;
+					buf->detectSignWidth(arg_width, arg_sign);
+
+					if (buf->type == AST_IDENTIFIER) {
+						id_ast = buf->id2ast;
+						if (id_ast == nullptr && current_scope.count(buf->str))
+							id_ast = current_scope.at(buf->str);
+						if (!id_ast)
+							input_error("Failed to resolve identifier %s for width detection!\n", buf->str);
+
+						auto member_select_width = buf->attributes.find(struct_array_member_width_attr());
+						if (member_select_width != buf->attributes.end()) {
+							// Explicit member bit/part selects already have a packed result
+							// width, independent of the member's declared dimensions.
+							width = member_select_width->second->asInt(false);
+							left = high = width - 1;
+							right = low = 0;
+							expr_dimensions = 1;
+						} else if (id_ast->type == AST_WIRE || id_ast->type == AST_MEMORY) {
+							// Check for item in packed struct / union
+							AstNode *item_node = buf->get_struct_member();
+							bool from_struct_array_member = false;
+							if (!item_node && buf->attributes.count(struct_array_member_attr())) {
+								item_node = buf->attributes.at(struct_array_member_attr()).get();
+								from_struct_array_member = true;
+							}
+							if (item_node)
+								id_ast = item_node;
+
+							// The dimension of the original array expression is saved in the 'integer' field.
+							// For struct array member selects, buf->integer counts outer array indices
+							// (for memory access checks), not dimensions sliced off the member itself.
+							int idx_dims = from_struct_array_member ? 0 : (int)buf->integer;
+							int dims = GetSize(id_ast->dimensions);
+							auto slice_it = !from_struct_array_member ? buf->attributes.find(packed_slice_dims_attr()) : buf->attributes.end();
+							if (slice_it != buf->attributes.end() && slice_it->second->type == AST_MULTIRANGE && !slice_it->second->children.empty()) {
+								auto &sdims = slice_it->second->children;
+								int total_dims = GetSize(sdims);
+								if (req_dim < 1 || req_dim > total_dims)
+									input_error("Dimension %d out of range in `%s', as it only has %d dimensions!\n", req_dim, id_ast->str, total_dims);
+								std::vector<int> dim_widths(total_dims, 1);
+								int dyn_idx = -1;
+								int known_prod = 1;
+								for (int i = 0; i < total_dims; i++) {
+									auto *r = sdims[i].get();
+									if (r->integer != 0) {
+										dyn_idx = i;
+									} else {
+										while (!r->range_valid && r->simplify(true, stage, -1, false)) { }
+										dim_widths[i] = r->range_left - r->range_right + 1;
+										known_prod *= dim_widths[i];
+									}
+								}
+								if (dyn_idx >= 0 && arg_width > 0 && known_prod > 0)
+									dim_widths[dyn_idx] = arg_width / known_prod;
+								expr_dimensions = total_dims - req_dim + 1;
+								expr_unpacked_dimensions = 0;
+								width = dim_widths[req_dim - 1];
+								mem_depth = 1;
+								for (int i = req_dim; i < total_dims; i++)
+									mem_depth *= dim_widths[i];
+								auto *qr = sdims[req_dim - 1].get();
+								if (qr->integer != 0) {
+									right = low = 0;
+									left = high = width - 1;
+								} else {
+									right = low = qr->range_right;
+									left = high = qr->range_left;
+									if (qr->range_swapped)
+										std::swap(left, right);
+								}
+							} else if (str == "\\$bits" && !buf->children.empty() && idx_dims >= id_ast->unpacked_dimensions && arg_width > 0) {
+								// Any packed bit-select, part-select, or fully-unpacked-indexed
+								// slice has bit width given directly by detectSignWidth().
+								width = arg_width;
+								right = low = 0;
+								left = high = width - 1;
+								expr_dimensions = 1;
+								expr_unpacked_dimensions = 0;
+							} else if (!buf->children.empty() && idx_dims == dims && req_dim == 1 && arg_width > 0) {
+								// Scalar bit-select of the innermost packed dimension
+								// produces a 1-D vector/bit of width arg_width.
+								width = arg_width;
+								right = low = 0;
+								left = high = width - 1;
+								expr_dimensions = 1;
+								expr_unpacked_dimensions = 0;
+							} else {
+								eval_from_dimensions(id_ast, req_dim + idx_dims);
+							}
+						} else {
+							width = arg_width;
+							right = low = 0;
+							left = high = width - 1;
+							expr_dimensions = 1;
+						}
+					} else {
+						width = arg_width;
+						right = low  = 0;
+						left  = high = width - 1;
+						expr_dimensions = 1;
+					}
 				}
 				if (str == "\\$dimensions")
 					result = expr_dimensions;

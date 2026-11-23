@@ -1,0 +1,4 @@
+read_verilog -sv bits_type_and_part_select.sv
+prep -top top -flatten
+async2sync
+sat -verify -prove-asserts
