@@ -1394,10 +1394,22 @@ static void collect_scope_members(const std::string &prefix, std::vector<AstNode
 	}
 }
 
+static bool decl_is_array(AstNode *decl)
+{
+	if (!decl)
+		return false;
+	if (decl->unpacked_dimensions > 0 || GetSize(decl->dimensions) > 1)
+		return true;
+	for (auto &c : decl->children)
+		if (c->type == AST_MULTIRANGE)
+			return true;
+	return false;
+}
+
 static std::vector<AstNode*> members_for_decl(AstNode *decl)
 {
 	std::vector<AstNode*> members;
-	if (!decl)
+	if (!decl || decl_is_array(decl))
 		return members;
 	AstNode *stype = nullptr;
 	if (decl->type == AST_STRUCT || decl->type == AST_UNION)
@@ -1456,6 +1468,8 @@ static std::vector<AstNode*> members_for_lhs(AstNode *lhs)
 				return members;
 		}
 	}
+	if (decl_is_array(lhs->id2ast))
+		return members;
 	members = members_for_decl(lhs->id2ast);
 	if (members.empty())
 		collect_scope_members(lhs->str, members);
@@ -1468,7 +1482,7 @@ static bool is_whole_struct_pattern_target(AstNode *lhs)
 	if (lhs->type != AST_IDENTIFIER)
 		return false;
 	if (lhs->children.empty())
-		return true;
+		return !decl_is_array(lhs->id2ast);
 
 	AstNode *member = lhs->get_struct_member();
 	if (!member || (member->type != AST_STRUCT && member->type != AST_UNION))

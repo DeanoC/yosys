@@ -103,13 +103,20 @@ module top (
 		sinner_t inner;
 		logic    tag;
 	} souter_t;
+	typedef struct packed {
+		logic [3:0] a;
+		logic [3:0] b;
+	} pair8_t;
 	localparam wrap_t P_WRAP = '{arr: '{default: 4'h6}, en: 1'b1};
+	localparam pair8_t P_PAIR = '{a: 4'hA, b: 4'h5};
 	wrap_t c_struct;
 	wrap_t c_struct_sub;
 	swrap_t c_swrap;
 	swrap_t c_swrap_sub;
 	swrap_t c_swrap_123;
 	souter_t c_souter;
+	pair8_t [1:0] c_pair_arr;
+	pair8_t [1:0] c_pair_idx;
 	logic [1:0][2:0][3:0] c3d_swrap_sarr;
 	logic [1:0][2:0][3:0] c3d_unsigned_srow;
 	logic [1:0][2:0][3:0] c3d_signed_row_cast;
@@ -140,6 +147,8 @@ module top (
 		c_swrap_123  = '{sarr: 12'h123, en: 1'b1};
 		c_souter     = '0;
 		c_souter.inner = '{a: 4'hA, b: 4'h5};
+		c_pair_arr   = '{default: P_PAIR};
+		c_pair_idx   = '{0: 8'h12, default: P_PAIR};
 		c3d_swrap_sarr = '{default: c_swrap_123.sarr};
 		c3d_unsigned_srow   = '{default: unsigned'(srow)};
 		c3d_signed_row_cast = '{default: signed'(row)};
@@ -197,6 +206,7 @@ module top (
 	always_comb assert(c_swrap.sarr == 12'shAAA && c_swrap.en == 1'b0);
 	always_comb assert(c_swrap_sub.sarr == 12'sh060 && c_swrap_sub.en == 1'b0);
 	always_comb assert(c_souter.inner == 8'shA5 && c_souter.tag == 1'b0);
+	always_comb assert(P_PAIR == 8'hA5 && c_pair_arr == 16'hA5A5 && c_pair_idx == 16'hA512);
 	always_comb assert(c3d_swrap_sarr == 24'h333333);
 	always_comb assert(c3d_unsigned_srow == 24'h123123);
 	always_comb assert(c3d_signed_row_cast == 24'h333333);
