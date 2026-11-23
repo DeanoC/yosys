@@ -480,7 +480,7 @@ bool expand_module(RTLIL::Design *design, RTLIL::Module *module, bool flag_check
 		   std::vector<std::string> &libdirs)
 {
 	bool did_something = false;
-	std::map<RTLIL::Cell*, std::pair<int, int>> array_cells;
+	dict<RTLIL::Cell*, std::pair<int, int>> array_cells;
 	std::string filename;
 
 	bool has_interface_ports = false;
@@ -656,7 +656,7 @@ bool expand_module(RTLIL::Design *design, RTLIL::Module *module, bool flag_check
 	return did_something;
 }
 
-void hierarchy_worker(RTLIL::Design *design, std::set<RTLIL::Module*> &used, RTLIL::Module *mod, int indent)
+void hierarchy_worker(RTLIL::Design *design, pool<RTLIL::Module*> &used, RTLIL::Module *mod, int indent)
 {
 	if (used.count(mod) > 0)
 		return;
@@ -680,7 +680,7 @@ void hierarchy_worker(RTLIL::Design *design, std::set<RTLIL::Module*> &used, RTL
 
 void hierarchy_clean(RTLIL::Design *design, RTLIL::Module *top, bool purge_lib)
 {
-	std::set<RTLIL::Module*> used;
+	pool<RTLIL::Module*> used;
 	hierarchy_worker(design, used, top, 0);
 
 	std::vector<RTLIL::Module*> del_modules;
@@ -714,7 +714,7 @@ void hierarchy_clean(RTLIL::Design *design, RTLIL::Module *top, bool purge_lib)
 	log("Removed %d unused modules.\n", del_counter);
 }
 
-bool set_keep_print(std::map<RTLIL::Module*, bool> &cache, RTLIL::Module *mod)
+bool set_keep_print(dict<RTLIL::Module*, bool> &cache, RTLIL::Module *mod)
 {
 	if (cache.count(mod) == 0) {
 		cache[mod] = false;
@@ -731,7 +731,7 @@ bool set_keep_print(std::map<RTLIL::Module*, bool> &cache, RTLIL::Module *mod)
 	return cache[mod];
 }
 
-bool set_keep_assert(std::map<RTLIL::Module*, bool> &cache, RTLIL::Module *mod)
+bool set_keep_assert(dict<RTLIL::Module*, bool> &cache, RTLIL::Module *mod)
 {
 	if (cache.count(mod) == 0) {
 		cache[mod] = false;
@@ -1166,7 +1166,7 @@ struct HierarchyPass : public Pass {
 		{
 			did_something = false;
 
-			std::set<RTLIL::Module*> used_modules;
+			pool<RTLIL::Module*> used_modules;
 			if (top_mod != NULL) {
 				log_header(design, "Analyzing design hierarchy..\n");
 				hierarchy_worker(design, used_modules, top_mod, 0);
@@ -1220,7 +1220,7 @@ struct HierarchyPass : public Pass {
 		}
 
 		if (!nokeep_prints) {
-			std::map<RTLIL::Module*, bool> cache;
+			dict<RTLIL::Module*, bool> cache;
 			for (auto mod : design->modules())
 				if (set_keep_print(cache, mod)) {
 					log("Module %s directly or indirectly displays text -> setting \"keep\" attribute.\n", mod);
@@ -1229,7 +1229,7 @@ struct HierarchyPass : public Pass {
 		}
 
 		if (!nokeep_asserts) {
-			std::map<RTLIL::Module*, bool> cache;
+			dict<RTLIL::Module*, bool> cache;
 			for (auto mod : design->modules())
 				if (set_keep_assert(cache, mod)) {
 					log("Module %s directly or indirectly contains formal properties -> setting \"keep\" attribute.\n", mod);
@@ -1258,8 +1258,8 @@ struct HierarchyPass : public Pass {
 
 		if (!keep_positionals)
 		{
-			std::set<RTLIL::Module*> pos_mods;
-			std::map<std::pair<RTLIL::Module*,int>, RTLIL::IdString> pos_map;
+			pool<RTLIL::Module*> pos_mods;
+			dict<std::pair<RTLIL::Module*,int>, RTLIL::IdString> pos_map;
 			std::vector<std::pair<RTLIL::Module*,RTLIL::Cell*>> pos_work;
 
 			for (auto mod : design->modules())
@@ -1333,7 +1333,7 @@ struct HierarchyPass : public Pass {
 						defaults_db[module->name][wire->name] = wire->attributes.at(ID::defaultvalue);
 		}
 		// Process SV implicit wildcard port connections
-		std::set<Module*> blackbox_derivatives;
+		pool<Module*> blackbox_derivatives;
 		std::vector<Module*> design_modules = design->modules();
 		for (auto module : design_modules)
 		{
